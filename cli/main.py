@@ -948,6 +948,7 @@ import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import time
 import subprocess
 import shutil
 from dotenv import load_dotenv
@@ -1058,8 +1059,19 @@ class CineProTUI:
             return {}
 
     def play_video(self, url, title, subtitles=None, headers=None):
-        mpv_args = ["mpv", url, f"--title={title}", "--fs"] # --fs for fullscreen
+        import time
+        import tempfile
+
+        mpv_args = ["mpv", url, f"--title={title}", "--fs", "--force-window=immediate", "--network-timeout=20", "--slang=ar,ara,arabic"] # --fs for fullscreen
         
+        # Create temp log file for monitoring playback start
+        try:
+            fd, log_path = tempfile.mkstemp(suffix=".log")
+            os.close(fd)
+            mpv_args.append(f"--log-file={log_path}")
+        except Exception:
+            log_path = None
+
         # Add shortcuts help to title or print it before
         console.print(Panel("[green]Starting Player...[/green]\n[yellow]Space: Pause | Arrows: Seek | F: Fullscreen | Q: Quit[/yellow]", title="MPV Player"))
 
@@ -1073,20 +1085,20 @@ class CineProTUI:
                 mpv_args.append(f"--referrer={ref}")
 
         if subtitles:
-            # Check for Arabic or user preferred subs
-            # Prioritize Arabic
+            # Prioritize Arabic. Do not load others to avoid overriding embedded subs.
             arabic_subs = [s for s in subtitles if s.get("lang", "").lower() in ["arabic", "ar", "ara"]]
+            
+            selected_sub = None
+            lang_name = "Unknown"
+
             if arabic_subs:
-                sub_url = arabic_subs[0]["url"]
+                selected_sub = arabic_subs[0]
+                lang_name = "Arabic"
+
+            if selected_sub:
+                sub_url = selected_sub["url"]
                 mpv_args.append(f"--sub-file={sub_url}")
-                console.print(f"[cyan]Subtitle loaded: Arabic[/cyan]")
-            else:
-                # Load first available or let mpv handle? 
-                # Mpv might need sub-file argument for external subs
-                if len(subtitles) > 0:
-                     sub_url = subtitles[0]["url"]
-                     mpv_args.append(f"--sub-file={sub_url}")
-                     console.print(f"[cyan]Subtitle loaded: {subtitles[0].get('lang', 'Unknown')}[/cyan]")
+                console.print(f"[cyan]Subtitle loaded: {lang_name}[/cyan]")
 
         try:
             # Check if mpv is available
@@ -1095,10 +1107,46 @@ class CineProTUI:
                 input("Press Enter to continue...")
                 return
 
-            subprocess.run(mpv_args)
+            process = subprocess.Popen(mpv_args)
+            
+            # Monitor startup
+            start_time = time.time()
+            timeout = 20
+            playback_started = False
+            
+            while process.poll() is None:
+                if not playback_started:
+                    # Check timeout
+                    if time.time() - start_time > 60:
+                        console.print(f"\n[red]Timeout: Stream did not start in 60 seconds.[/red]")
+                        process.terminate()
+                        break
+                    
+                    # Check log for success
+                    if log_path and os.path.exists(log_path):
+                        try:
+                            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                                # Indicators of playback
+                                if "starting playback" in content or "AO:" in content or "VO:" in content:
+                                    playback_started = True
+                        except Exception:
+                            pass
+                
+                time.sleep(0.5)
+            
+            if process.poll() is None:
+                process.wait()
+
         except Exception as e:
             console.print(f"[red]Error running mpv: {e}[/red]")
             input("Press Enter to continue...")
+        finally:
+            if log_path and os.path.exists(log_path):
+                try:
+                    os.remove(log_path)
+                except Exception:
+                    pass
 
     def selection_menu(self, items, title, formatter=lambda x: str(x), can_jump=False):
         """
@@ -1440,12 +1488,11 @@ class CineProTUI:
 
             # Action Menu Loop
             while True:
-                action_menu = ['Play', 'Download', 'Show Source']
+                action_menu = ['Play', 'Download']
 
                 def act_fmt(x): 
                     if x == 'Play': return f"▶ {x}"
                     if x == 'Download': return f"⬇ {x}"
-                    if x == 'Show Source': return f"ℹ {x}"
                     return x
                 
                 act_sel = self.selection_menu(action_menu, f"{title} - Choose Action", act_fmt)
@@ -1455,11 +1502,7 @@ class CineProTUI:
 
                 if act_sel['value'] == 'Play':
                     self.play_video(selected_file['file'], title, subtitles, selected_file.get('headers'))
-                elif act_sel['value'] == 'Show Source':
-                    console.print(Panel(f"[bold cyan]Source URL:[/bold cyan]\n{selected_file['file']}", title="Source Info"))
-                    if selected_file.get('headers'):
-                        console.print(Panel(str(selected_file.get('headers')), title="Headers"))
-                    input("Press Enter to continue...")
+                    break # Go back to source selection
                 elif act_sel['value'] == 'Download':
                     # Sanitize filename
                     safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c==' ' or c=='_']).rstrip().replace(' ', '_')
@@ -1475,7 +1518,8 @@ class CineProTUI:
                     self.download_video(selected_file['file'], filename, selected_file.get('headers'))
 
     def download_video(self, url, filename, headers=None):
-        # Check if it's an HLS stream
+        # Check if it's an HLS stream (Force MPV Record)
+        # IDM and Aria2 often fail with m3u8, downloading only the playlist file.
         if '.m3u8' in url or '.m3u' in url:
             console.print(f"\n[bold yellow]⚠ Stream is HLS (m3u8). Using MPV to record...[/bold yellow]")
             console.print(f"[dim]Output: {filename}[/dim]")
@@ -1500,13 +1544,132 @@ class CineProTUI:
                  # Other headers... simplified for now
             
             try:
-                subprocess.run(mpv_cmd)
-                console.print(f"\n[bold green]✔ Recording Complete:[/bold green] {filename}")
+                process = subprocess.Popen(mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                start = time.monotonic()
+                last_size = 0
+                last_t = start
+                def fmt_bytes(n):
+                    units = ["B","KB","MB","GB","TB"]
+                    i = 0
+                    f = float(n)
+                    while f >= 1024 and i < len(units)-1:
+                        f /= 1024
+                        i += 1
+                    return f"{f:.2f} {units[i]}"
+                def fmt_duration(s):
+                    h = int(s // 3600)
+                    m = int((s % 3600) // 60)
+                    sec = int(s % 60)
+                    if h > 0:
+                        return f"{h:02d}:{m:02d}:{sec:02d}"
+                    return f"{m:02d}:{sec:02d}"
+                with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+                    task = progress.add_task("Recording...", total=None)
+                    while process.poll() is None:
+                        size = os.path.getsize(filename) if os.path.exists(filename) else 0
+                        now = time.monotonic()
+                        dt = max(now - last_t, 1e-3)
+                        speed = (size - last_size) / dt if size >= last_size else 0
+                        desc = f"Downloaded {fmt_bytes(size)} | Speed {fmt_bytes(speed)}/s | Elapsed {fmt_duration(now - start)}"
+                        progress.update(task, description=desc)
+                        last_size = size
+                        last_t = now
+                        time.sleep(1)
+                if process.returncode == 0:
+                    console.print(f"\n[bold green]✔ Recording Complete:[/bold green] {filename}")
+                    mp4_out = filename[:-3] + "mp4" if filename.lower().endswith(".ts") else filename + ".mp4"
+                    if shutil.which("ffmpeg"):
+                        console.print(f"[cyan]Converting to MP4...[/cyan]")
+                        try:
+                            subprocess.run(
+                                ["ffmpeg", "-y", "-i", filename, "-c", "copy", "-bsf:a", "aac_adtstoasc", mp4_out],
+                                check=True,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            if os.path.exists(mp4_out) and os.path.getsize(mp4_out) > 1024 * 1024:
+                                console.print(f"[bold green]✔ Conversion Complete:[/bold green] {mp4_out}")
+                                try:
+                                    os.remove(filename)
+                                    console.print(f"[dim]Deleted source TS file[/dim]")
+                                except Exception:
+                                    pass
+                            else:
+                                console.print("[red]Conversion failed: MP4 output invalid.[/red]")
+                        except Exception as e:
+                            console.print(f"[red]Conversion error:[/red] {e}")
+                    else:
+                        console.print("[yellow]ffmpeg not found. Keeping TS file.[/yellow]")
+                else:
+                    console.print(f"[red]Recording failed (exit {process.returncode}).[/red]")
             except Exception as e:
-                console.print(f"[red]MPV Transfer failed:[/red] {e}")
+                console.print(f"[red]Recording error:[/red] {e}")
             
             input("Press Enter to continue...")
             return
+
+        # 1. Try Internet Download Manager (IDM)
+        # Common IDM paths
+        idm_paths = [
+            r"C:\Program Files (x86)\Internet Download Manager\IDMan.exe",
+            r"C:\Program Files\Internet Download Manager\IDMan.exe"
+        ]
+        
+        idm_exe = None
+        for p in idm_paths:
+            if os.path.exists(p):
+                idm_exe = p
+                break
+        
+        if idm_exe:
+            console.print(f"\n[cyan]Sending to Internet Download Manager (IDM)...[/cyan]")
+            try:
+                # IDM Command Line: /d URL /p PATH /f FILENAME /a (add to queue) or /s (start)
+                # /n - silent
+                # /a - add to download queue
+                # /s - start queue
+                # /d <url> - downloads file
+                
+                # Construct absolute path for output
+                output_dir = os.path.abspath(os.getcwd())
+                
+                # IDM doesn't support custom headers via CLI easily without "IDM Integration Module" in browser
+                # But basic /d works for direct links.
+                
+                cmd = [idm_exe, '/d', url, '/p', output_dir, '/f', filename, '/n', '/s']
+                subprocess.Popen(cmd)
+                console.print(f"[green]✔ Sent to IDM![/green]")
+                input("Press Enter to continue...")
+                return
+            except Exception as e:
+                console.print(f"[red]IDM failed, falling back... ({e})[/red]")
+
+        # 2. Try Aria2c
+        if shutil.which("aria2c"):
+            console.print(f"\n[cyan]Starting Aria2c download...[/cyan]")
+            try:
+                aria_cmd = [
+                    "aria2c", url, 
+                    "-o", filename, 
+                    "-x", "16", # 16 connections
+                    "-s", "16", 
+                    "--file-allocation=none",
+                    "--summary-interval=1"
+                ]
+                
+                if headers:
+                    ua = headers.get('User-Agent') or headers.get('user-agent')
+                    if ua: aria_cmd.append(f"--user-agent={ua}")
+                    ref = headers.get('Referer') or headers.get('referer')
+                    if ref: aria_cmd.append(f"--referer={ref}")
+                    # Add other headers if needed
+                
+                subprocess.run(aria_cmd)
+                console.print(f"\n[bold green]✔ Download Complete (Aria2):[/bold green] {filename}")
+                input("Press Enter to continue...")
+                return
+            except Exception as e:
+                console.print(f"[red]Aria2 failed, falling back... ({e})[/red]")
 
         # Fallback to standard HTTP download for .mp4 etc
         try:

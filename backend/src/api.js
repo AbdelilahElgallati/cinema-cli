@@ -14,6 +14,8 @@ import { getCacheKey, getFromCache, setToCache } from './cache/cache.js';
 import { get111Movies } from './controllers/providers/111movies/111movies.js';
 import { getCinemaOS } from './controllers/providers/CinemaOS/CinemaOS.js';
 import { getMultiembed } from './controllers/providers/MultiEmbed/MultiEmbed.js';
+import { getEmbedsu } from './controllers/providers/EmbedSu/embedsu.js';
+import { getFebbox } from './controllers/subs/febbox.js';
 import { validateSources } from './utils/sourceValidator.js';
 
 const shouldDebug = process.argv.includes('--debug');
@@ -50,8 +52,9 @@ export async function scrapeMedia(media) {
         { getVidSrc: () => getVidSrc(media) },
         { getVidrock: () => getVidRock(media) },
         { getMultiembed: () => getMultiembed(media) },
+        { getEmbedsu: () => getEmbedsu(media) },
         // This seems to be intermittent i will need to look into it more. i have a hunch its rate limited.
-        { getCinemaOS: () => getCinemaOS(media) },
+        // { getCinemaOS: () => getCinemaOS(media) },
 
         // #### NOTE from Inside4ndroid : i have not looked at anything below this line yet!
 
@@ -69,7 +72,8 @@ export async function scrapeMedia(media) {
         // { getVidsrcWtf: () => getVidsrcWtf(media) },
         // SUB SEARCH
         { getWyzie: () => getWyzie(media) },
-        { getLibre: () => getLibre(media) }
+        { getLibre: () => getLibre(media) },
+        { getFebbox: () => getFebbox(media) }
     ];
 
     const results = await Promise.all(
