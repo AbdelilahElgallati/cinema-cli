@@ -140,15 +140,20 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
         
         item = items[selected_index]
         overview = item.get('overview', 'No description available.')
-        if len(overview) > 300:
-            overview = overview[:297] + "..."
+        
+        # Wrap overview text at 50 characters for better readability
+        def wrap_text(text, width=50):
+            import textwrap
+            return '\n'.join(textwrap.wrap(text, width=width))
+        
+        overview = wrap_text(overview)
         
         rating = item.get('vote_average', 0)
         votes = item.get('vote_count', 0)
         popularity = item.get('popularity', 0)
         
         details = f"\n<title> {item.get('title') or item.get('name')} </title>\n"
-        details += f"<border>{'━' * 40}</border>\n"
+        details += f"<border>{'━' * 50}</border>\n"
         details += f"<rating>⭐ Rating: {rating:.1f}/10 ({votes} votes)</rating>\n"
         details += f"<pop>🔥 Popularity: {popularity:.0f}</pop>\n\n"
         details += f"<overview>{overview}</overview>\n"
@@ -170,7 +175,7 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
     # Layout with details on the right
     body = VSplit(
         [
-            Window(content=FormattedTextControl(get_formatted_text), width=62),
+            Window(content=FormattedTextControl(get_formatted_text), width=60),
             Window(content=FormattedTextControl(get_details_text))
         ],
         padding=2
