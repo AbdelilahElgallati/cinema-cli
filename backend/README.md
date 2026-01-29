@@ -4,6 +4,11 @@
 
 This repository contains the logic for the Backend of CinePro. It is an **open-source movie and tv show scraper API**. You can get various sources for the movie or tv show you are looking for using this API. It also uses node-cache to store the data it scrapes, so it does not have to scrape the same movie or tv show repeatedly.
 
+## 🚀 Integration with CinePro CLI
+
+This backend is the core data provider for the **[CinePro CLI](../README.md)**.
+To use the CLI, you must have this backend running locally.
+
 > [!Note]
 > This project is **not** meant for public hosting (you should not be able to access it over the internet). It is meant to be used as a backend for your own personal use. You can host it on your local machine or on a private server. If you want to use it as a public API, you should consider using a different project, since this project is not optimized/secured for public use.
 

@@ -34,3 +34,7 @@ htmlcov/
 # Temporary files
 tmp/
 temp/
+
+.download_temp/
+
+*.mp4
