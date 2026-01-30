@@ -8,6 +8,7 @@ load_dotenv()
 # Configuration
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+OPENSUBTITLES_API_KEY = os.getenv("OPENSUBTITLES_API_KEY", "")
 
 # Modern Color Scheme
 PRIMARY = "#FF4B2B"    # Vibrant Red-Orange

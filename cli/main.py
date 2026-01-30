@@ -371,10 +371,13 @@
 #                 return True
 #             elif act['value'] == '⬇ Download':
 #                 safe_title = "".join(c for c in title if c.isalnum() or c in ' _-').strip().replace(' ', '_')
-#                 ext = 'mp4'
-#                 if '.m3u8' in selected.get('file', '') or '.m3u' in selected.get('file', ''):
-#                     ext = 'ts'
-#                 filename = f"{safe_title}.{ext}"
+                
+#                 # --- START MODIFICATION ---
+#                 # Removed the logic to force a '.ts' extension for HLS/M3U8.
+#                 # downloads.py will now handle the correct extension and use yt-dlp to merge to .mp4.
+#                 filename = f"{safe_title}.mp4"
+#                 # --- END MODIFICATION ---
+                
 #                 download_stream(selected.get('file'), filename, subtitles, selected.get('headers'), session=self.api.session)
 #                 return False
 
@@ -405,6 +408,7 @@
 #         sys.exit(0)
 
 
+
 import sys
 import os
 import time
@@ -416,11 +420,10 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-# from src.config import console, BACKEND_URL, TMDB_API_KEY, HISTORY_FILE, FAVORITES_FILE, SETTINGS_FILE, PRIMARY, SECONDARY, ACCENT, TEXT, SUCCESS, WARNING
 from src.config import console, BACKEND_URL, TMDB_API_KEY, HISTORY_FILE, FAVORITES_FILE, SETTINGS_FILE, PRIMARY, SECONDARY, ACCENT, TEXT, SUCCESS, WARNING
 from src.utils.storage import load_json_data, save_json_data
 from src.utils.api import APIClient
-from src.ui.ui import print_header, show_splash, selection_menu, format_item, clear
+from src.ui.ui import print_header, show_splash, selection_menu, multi_selection_menu, format_item, clear
 from src.utils.player import play_stream, play_video
 from src.utils.downloads import download_stream
 
@@ -673,7 +676,10 @@ class CinemaCLI:
         title = media.get('title')
         tmdb_id = media.get('id')
         data = self.api.get_sources_api(tmdb_id, 'movie')
-        self.handle_sources(title, data)
+        rel = media.get('release_date') or ''
+        year = rel[:4] if isinstance(rel, str) and len(rel) >= 4 else None
+        meta = {"year": year}
+        self.handle_sources(title, data, meta)
 
     def show_seasons(self, media):
         print_header(f"{media.get('name')} - Seasons")
@@ -712,6 +718,11 @@ class CinemaCLI:
         while True:
             sel = selection_menu(episodes, f"Season {s_num} Episodes", show_details=True, formatter=fmt_ep, default_index=selected_idx)
             if not sel or sel['action'] == 'back': break
+            
+            if sel['action'] == 'batch':
+                self.handle_batch_download(media, season, episodes)
+                continue
+
             if sel['action'] == 'select':
                 ep = sel['value']
                 selected_idx = episodes.index(ep)
@@ -719,7 +730,10 @@ class CinemaCLI:
                 while True:
                     title = f"{media.get('name')} S{s_num}E{ep['episode_number']} - {ep.get('name')}"
                     data = self.api.get_sources_api(media['id'], 'tv', s_num, ep['episode_number'])
-                    played = self.handle_sources(title, data)
+                    air = ep.get('air_date') or ''
+                    year = air[:4] if isinstance(air, str) and len(air) >= 4 else None
+                    meta = {"year": year, "season": s_num, "episode": ep.get('episode_number')}
+                    played = self.handle_sources(title, data, meta)
                     
                     if not played:
                         break
@@ -753,7 +767,93 @@ class CinemaCLI:
                     elif choice == "Back to List":
                         break
 
-    def handle_sources(self, title, data):
+    def handle_batch_download(self, media, season, episodes):
+        s_num = season['season_number']
+        
+        def fmt_ep(x):
+            name = x.get('name', 'Unknown')
+            ep_num = x.get('episode_number', '?')
+            return f"E{ep_num} - {name}"
+
+        selected_episodes = multi_selection_menu(episodes, f"Select Episodes to Download (S{s_num})", formatter=fmt_ep)
+        
+        if not selected_episodes:
+            return
+
+        console.print(f"\n[bold {PRIMARY}]Preparing batch download for {len(selected_episodes)} episodes...[/bold {PRIMARY}]")
+        
+        # We need to pick a source. To avoid asking for every episode, 
+        # we'll ask for the first one and try to use the same provider for others.
+        first_ep = selected_episodes[0]
+        first_title = f"{media.get('name')} S{s_num}E{first_ep['episode_number']} - {first_ep.get('name')}"
+        first_data = self.api.get_sources_api(media['id'], 'tv', s_num, first_ep['episode_number'])
+        
+        files = first_data.get('files', [])
+        if not files:
+            console.print("[red]No sources found for the first episode. Batch download cancelled.[/red]")
+            time.sleep(2)
+            return
+
+        def fmt_src(x):
+            q = x.get('quality', 'auto')
+            p = x.get('provider', 'src')
+            t = x.get('type', 'std')
+            return f"{p.upper():<12} [{q}] {t}"
+
+        sel = selection_menu(files, f"Select Source for Batch - {first_title}", show_details=False, formatter=fmt_src)
+        if not sel or sel['action'] != 'select':
+            return
+            
+        selected_source = sel['value']
+        provider = selected_source.get('provider')
+        quality = selected_source.get('quality')
+
+        for ep in selected_episodes:
+            title = f"{media.get('name')} S{s_num}E{ep['episode_number']} - {ep.get('name')}"
+            console.print(f"\n[bold {ACCENT}]Processing: {title}[/bold {ACCENT}]")
+            
+            # --- CRITICAL FIX ---
+            # We MUST fetch new data for EVERY episode to get its unique source URL.
+            data = self.api.get_sources_api(media['id'], 'tv', s_num, ep['episode_number'])
+            files = data.get('files', [])
+            subtitles = data.get('subtitles', [])
+            air = ep.get('air_date') or ''
+            year = air[:4] if isinstance(air, str) and len(air) >= 4 else None
+            meta = {"year": year, "season": s_num, "episode": ep.get('episode_number')}
+            
+            # Try to find the same provider and quality in the NEW files list
+            target_file = None
+            for f in files:
+                if f.get('provider') == provider and f.get('quality') == quality:
+                    target_file = f
+                    break
+            
+            # Fallback to same provider
+            if not target_file:
+                for f in files:
+                    if f.get('provider') == provider:
+                        target_file = f
+                        break
+            
+            # Fallback to first available
+            if not target_file and files:
+                target_file = files[0]
+                
+            if target_file:
+                safe_title = "".join(c for c in title if c.isalnum() or c in ' _-').strip().replace(' ', '_')
+                filename = f"{safe_title}.mp4"
+                console.print(f"[green]Downloading using {target_file.get('provider')} ({target_file.get('quality')})...[/green]")
+                # The target_file['file'] now contains the UNIQUE URL for THIS episode.
+                download_stream(target_file.get('file'), filename, subtitles, target_file.get('headers'), session=self.api.session, meta=meta)
+                # Small delay to avoid overwhelming the server
+                time.sleep(0.5)
+            else:
+                console.print(f"[red]No suitable source found for {title}. Skipping...[/red]")
+        
+        console.print(f"\n[bold {SUCCESS}]Batch download completed![/bold {SUCCESS}]")
+        time.sleep(2)
+
+    def handle_sources(self, title, data, meta=None):
         files = data.get('files', [])
         subtitles = data.get('subtitles', [])
         if not files:
@@ -774,18 +874,12 @@ class CinemaCLI:
             if not act or act['action'] in ['back', 'quit']:
                 continue
             if act['value'] == '▶ Play':
-                play_stream(selected.get('file'), title, subtitles, selected.get('headers'))
+                play_stream(selected.get('file'), title, subtitles, selected.get('headers'), meta)
                 return True
             elif act['value'] == '⬇ Download':
                 safe_title = "".join(c for c in title if c.isalnum() or c in ' _-').strip().replace(' ', '_')
-                
-                # --- START MODIFICATION ---
-                # Removed the logic to force a '.ts' extension for HLS/M3U8.
-                # downloads.py will now handle the correct extension and use yt-dlp to merge to .mp4.
                 filename = f"{safe_title}.mp4"
-                # --- END MODIFICATION ---
-                
-                download_stream(selected.get('file'), filename, subtitles, selected.get('headers'), session=self.api.session)
+                download_stream(selected.get('file'), filename, subtitles, selected.get('headers'), session=self.api.session, meta=meta)
                 return False
 
     def start_player(self, url, title):
