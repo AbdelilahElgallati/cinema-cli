@@ -189,6 +189,7 @@
 import os
 import time
 import sys
+import html
 from rich.panel import Panel
 from rich.text import Text
 from rich.align import Align
@@ -345,11 +346,14 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
         votes = item.get('vote_count', 0)
         popularity = item.get('popularity', 0)
         
-        details = f"\n<title> {item.get('title') or item.get('name')} </title>\n"
+        title_text = html.escape(str(item.get('title') or item.get('name')))
+        overview_text = html.escape(overview)
+        
+        details = f"\n<title> {title_text} </title>\n"
         details += f"<border>{'━' * 50}</border>\n"
         details += f"<rating>⭐ Rating: {rating:.1f}/10 ({votes} votes)</rating>\n"
         details += f"<pop>🔥 Popularity: {popularity:.0f}</pop>\n\n"
-        details += f"<overview>{overview}</overview>\n"
+        details += f"<overview>{overview_text}</overview>\n"
         
         return HTML(details)
 

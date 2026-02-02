@@ -22,6 +22,7 @@ TEXT = "#E0E0E0"       # Off-white text
 # Storage Files
 HISTORY_FILE = os.path.expanduser("~/.cinema-cli-history.json")
 FAVORITES_FILE = os.path.expanduser("~/.cinema-cli-favorites.json")
+PLAYBACK_FILE = os.path.expanduser("~/.cinema-cli-playback.json")
 SETTINGS_FILE = os.path.expanduser("~/.cinema-cli-settings.json")
 
 console = Console()

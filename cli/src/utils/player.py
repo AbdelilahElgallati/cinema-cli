@@ -1,51 +1,3 @@
-# import shutil
-# import subprocess
-# import time
-# from rich.panel import Panel
-# from rich.align import Align
-# from src.config import console, SUCCESS
-# from src.ui.ui import clear
-
-# def play_stream(url, title, subtitles=None, headers=None):
-#     clear()
-#     console.print(Panel(Align.center(f"[bold {SUCCESS}]Starting Player: {title}[/bold {SUCCESS}]\n\n[dim]{url}[/dim]"), title="MPV Player", border_style=SUCCESS))
-#     if shutil.which("mpv") is None:
-#         console.print(f"\n[bold red]MPV not found![/bold red]")
-#         console.input("\nPress Enter to return...")
-#         return
-#     mpv_args = ["mpv", url, f"--title={title}", "--fs", "--force-window=immediate", "--network-timeout=60", "--slang=ar,ara,arabic,en,eng"]
-#     if headers:
-#         ua = headers.get('User-Agent') or headers.get('user-agent')
-#         if ua: mpv_args.append(f"--user-agent={ua}")
-#         ref = headers.get('Referer') or headers.get('referer')
-#         if ref: mpv_args.append(f"--referrer={ref}")
-#     if subtitles:
-#         ar = [s for s in subtitles if s.get("lang", "").lower() in ["arabic", "ar", "ara"]]
-#         if ar:
-#             mpv_args.append(f"--sub-file={ar[0]['url']}")
-#     try:
-#         subprocess.run(mpv_args, check=False)
-#     except Exception as e:
-#         console.print(f"[red]Error: {e}[/red]")
-#         time.sleep(2)
-
-# def play_video(url, title):
-#     clear()
-#     console.print(Panel(
-#         Align.center(f"[bold {SUCCESS}]Starting Player: {title}[/bold {SUCCESS}]\n\n[dim]{url}[/dim]"),
-#         title="MPV Player",
-#         border_style=SUCCESS
-#     ))
-#     try:
-#         if shutil.which("mpv"):
-#             subprocess.run(["mpv", url, f"--title={title}", "--fs"], check=False)
-#         else:
-#             console.print(f"\n[bold red]MPV not found![/bold red]")
-#             console.input("\nPress Enter to return...")
-#     except Exception as e:
-#         console.print(f"[red]Error: {e}[/red]")
-#         time.sleep(2)
-
 
 import shutil
 import subprocess
@@ -56,24 +8,32 @@ from src.config import console, SUCCESS
 from src.ui.ui import clear
 from src.utils.subtitles import fetch_arabic_subtitle
 
-def play_stream(url, title, subtitles=None, headers=None, meta=None):
+def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=0):
     """
     Plays a stream using mpv. It attempts to use yt-dlp as a stream source
     if available, as it handles complex stream URLs and headers better.
+    Returns a dict with playback stats: {position, duration, finished}
     """
     clear()
-    console.print(Panel(Align.center(f"[bold {SUCCESS}]Starting Player: {title}[/bold {SUCCESS}]\n\n[dim]{url}[/dim]"), title="MPV Player", border_style=SUCCESS))
+    console.print(Panel(Align.center(f"[bold {SUCCESS}]Starting Player: {title}[/bold {SUCCESS}]\n\n[dim]{url}[/dim]\n\n[white]Controls: q=Quit, Space=Pause, z/x=Sub Sync (-/+), j=Audio, v=Sub Visibility[/white]"), title="MPV Player", border_style=SUCCESS))
     
     if shutil.which("mpv") is None:
         console.print(f"\n[bold red]MPV not found![/bold red]")
         console.input("\nPress Enter to return...")
-        return
+        return None
 
     mpv_args = ["mpv", url, f"--title={title}", "--fs", "--force-window=immediate", "--network-timeout=60", "--slang=ar,ara,arabic,en,eng", "--sub-auto=exact"]
     
+    if start_time > 0:
+        mpv_args.append(f"--start={start_time}")
+    
+    # Enable status message for progress tracking
+    mpv_args.extend(["--term-status-msg=STATUS: ${=time-pos} / ${=duration}"])
+
     # 1. Try to use yt-dlp as a stream source for better compatibility
     if shutil.which("yt-dlp"):
         mpv_args = ["mpv", "--ytdl", url, f"--title={title}", "--fs", "--force-window=immediate", "--network-timeout=60", "--slang=ar,ara,arabic,en,eng"]
+        mpv_args.extend(["--term-status-msg=STATUS: ${=time-pos} / ${=duration}"])
         
         # yt-dlp handles headers better when passed via the --http-header-fields option
         if headers:
@@ -140,10 +100,42 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None):
         mpv_args.append(f"--sub-file={sub_path}")
             
     try:
-        subprocess.run(mpv_args, check=False)
+        process = subprocess.Popen(
+            mpv_args, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            universal_newlines=True, 
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        position = 0
+        duration = 0
+        
+        while True:
+            line = process.stdout.readline()
+            if not line: break
+            
+            if "STATUS:" in line:
+                try:
+                    parts = line.split("STATUS:")[1].strip().split("/")
+                    if len(parts) >= 2:
+                        p = float(parts[0].strip())
+                        d = float(parts[1].strip())
+                        if d > 0:
+                            position = p
+                            duration = d
+                except:
+                    pass
+        
+        process.wait()
+        
+        return {"position": position, "duration": duration, "finished": (duration > 0 and position > duration * 0.9)}
+
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         time.sleep(2)
+        return None
 
 def play_video(url, title):
     # This function is for direct video links, no change needed here
