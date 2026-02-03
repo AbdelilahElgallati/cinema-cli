@@ -16,8 +16,8 @@ To use the CLI, you must have this backend running locally.
 
 - NO ADS and NO TRACKING!
 - Supported Media types:
-    - Movie
-    - TV Show
+  - Movie
+  - TV Show
 
 > [!Warning]
 > Since this project is still in development, some features might not work as expected. TV shows are not fully supported yet. It will come after the movie scraping is done.

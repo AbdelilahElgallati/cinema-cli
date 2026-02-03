@@ -8,8 +8,8 @@
  * // checkIfPossibleTmdbId("1234567890abc"); // false
  */
 export function checkIfPossibleTmdbId(text) {
-    let regex = /^[0-9]+$/;
-    return regex.test(text);
+  let regex = /^[0-9]+$/;
+  return regex.test(text);
 }
 
 /**
@@ -18,5 +18,5 @@ export function checkIfPossibleTmdbId(text) {
  * @param errorObject {ErrorObject} The error object to handle.
  */
 export function handleErrorResponse(res, errorObject) {
-    res.status(errorObject._responseCode).json(errorObject.toJSON());
+  res.status(errorObject._responseCode).json(errorObject.toJSON());
 }

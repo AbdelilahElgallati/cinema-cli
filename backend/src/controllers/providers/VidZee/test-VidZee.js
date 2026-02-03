@@ -2,18 +2,18 @@
 import { getVidZee } from './VidZee.js';
 
 async function test() {
-    const media = {
-        type: 'movie',
-        tmdb: 550
-    };
+  const media = {
+    type: 'movie',
+    tmdb: 550,
+  };
 
-    try {
-        const result = await getVidZee(media);
-        console.log('=== VidZee Result ===');
-        console.dir(result, { depth: null });
-    } catch (err) {
-        console.error('Test failed:', err);
-    }
+  try {
+    const result = await getVidZee(media);
+    console.log('=== VidZee Result ===');
+    console.dir(result, { depth: null });
+  } catch (err) {
+    console.error('Test failed:', err);
+  }
 }
 
 test();

@@ -3,18 +3,18 @@
 import { getVidsrcWtf } from './VidSrcwtf.js';
 
 async function test() {
-    const media = {
-        type: 'movie',
-        tmdb: 755898
-    };
+  const media = {
+    type: 'movie',
+    tmdb: 755898,
+  };
 
-    try {
-        const result = await getVidsrcWtf(media);
-        console.log('=== VidSrcWtf Result ===');
-        console.dir(result, { depth: null });
-    } catch (err) {
-        console.error('Test failed:', err);
-    }
+  try {
+    const result = await getVidsrcWtf(media);
+    console.log('=== VidSrcWtf Result ===');
+    console.dir(result, { depth: null });
+  } catch (err) {
+    console.error('Test failed:', err);
+  }
 }
 
 test();

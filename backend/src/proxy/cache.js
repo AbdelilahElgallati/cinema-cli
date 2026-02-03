@@ -9,27 +9,27 @@ const segmentCache = new Map();
 const isCacheDisabled = () => process.env.DISABLE_CACHE === 'true';
 
 export function cleanupCache() {
-    const now = Date.now();
-    let expiredCount = 0;
+  const now = Date.now();
+  let expiredCount = 0;
 
-    for (const [url, entry] of segmentCache.entries()) {
-        if (now - entry.timestamp > CACHE_EXPIRY_MS) {
-            segmentCache.delete(url);
-            expiredCount++;
-        }
+  for (const [url, entry] of segmentCache.entries()) {
+    if (now - entry.timestamp > CACHE_EXPIRY_MS) {
+      segmentCache.delete(url);
+      expiredCount++;
     }
+  }
 
-    // Remove oldest entries if cache is too big
-    if (segmentCache.size > CACHE_MAX_SIZE) {
-        const entries = Array.from(segmentCache.entries()).sort(
-            (a, b) => a[1].timestamp - b[1].timestamp
-        );
+  // Remove oldest entries if cache is too big
+  if (segmentCache.size > CACHE_MAX_SIZE) {
+    const entries = Array.from(segmentCache.entries()).sort(
+      (a, b) => a[1].timestamp - b[1].timestamp
+    );
 
-        const toRemove = entries.slice(0, segmentCache.size - CACHE_MAX_SIZE);
-        for (const [url] of toRemove) {
-            segmentCache.delete(url);
-        }
+    const toRemove = entries.slice(0, segmentCache.size - CACHE_MAX_SIZE);
+    for (const [url] of toRemove) {
+      segmentCache.delete(url);
     }
+  }
 
-    return segmentCache.size;
+  return segmentCache.size;
 }

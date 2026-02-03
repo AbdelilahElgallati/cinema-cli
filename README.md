@@ -18,56 +18,138 @@ A powerful, feature-rich movie and TV CLI application integrated with the CinePr
 ### 🔍 **Rich Discovery**
 - **TMDB Integration**: Search with rich metadata including release years, ratings, and posters (if your terminal supports it).
 - **Favorites & History**: Keep track of what you're watching and save your favorites.
+# CinePro CLI 🎬
 
-## 📂 Project Structure
+A terminal-first movie and TV client that uses a local CinePro backend to find playable streams and subtitles. Designed for fast browsing, smooth playback with `mpv`, and reliable downloads.
 
-- `backend/`: The CinePro scraping backend (Node.js) - *Required for content sources*.
-- `cli/`: The Python-based CLI application - *Your main interface*.
+This repository contains two main parts:
+- `backend/` — Node.js scraper and proxy that finds media sources.
+- `cli/` — Python TUI (terminal UI) client that queries the backend and plays or downloads media.
 
-## 🛠️ Setup & Installation
+Highlights
+- Stream playback via `mpv` (with optional `yt-dlp` support).
+- Automatic Arabic subtitle discovery and local subtitle downloads.
+- Background download manager with `aria2c` support (optional).
+- Built-in proxying for HLS and segment requests to avoid CORS/auth issues.
 
-### 1. Prerequisites
+Table of contents
+- Features
+- Requirements
+- Quick start (dev)
+- Configuration (.env)
+- Usage
+- Troubleshooting
+- Contributing
+- License
 
-Ensure you have the following installed on your system (add them to your PATH):
+## Features
 
-- **Python 3.8+**
-- **Node.js** (for the backend)
-- **MPV**: Required for streaming video.
-- **FFmpeg**: Required for processing downloads.
-- **Aria2c** (Optional): Highly recommended for 16x faster multi-threaded downloads.
+- Interactive text UI with keyboard navigation.
+- TMDB integration for search and metadata.
+- Plays streams directly in `mpv` with header/referrer support.
+- Downloads managed in background worker threads.
+- Subtitle fetching and local caching (prefers Arabic subtitles).
+- Local backend auto-start from the CLI (configurable). Logs are written to `backend/backend.log`.
 
-### 2. Backend Setup
+## Requirements
 
-The CLI relies on the local backend to fetch links.
+- Python 3.8+ (for the CLI)
+- Node.js (for the backend)
+- `mpv` (for playback)
+- `ffmpeg` (for certain download tasks)
+- Optional: `yt-dlp` for improved stream handling, `aria2c` for faster downloads
+
+## Quick start (development)
+
+1. Clone the repo and change to the project root:
+
+```bash
+git clone https://github.com/AbdelilahElgallati/cinema-cli
+cd cinema-cli
+cp .env_example .env
+# Edit .env and add your TMDB_API_KEY and other settings
+```
+
+2. Backend (one-time setup):
 
 ```bash
 cd backend
 npm install
-cp .env_example .env
-# Edit .env and add your TMDB_API_KEY
 npm start
 ```
 
-### 3. CLI Setup
-
-Open a new terminal window for the CLI.
+3. CLI (in a second terminal):
 
 ```bash
 cd cli
 pip install -r requirements.txt
-python main.py
+python -m cli.main
 ```
 
-## 🎮 Usage
+4. Single-terminal convenience (CLI will auto-start backend):
 
-1.  **Search**: Type a query to find movies or TV shows.
-2.  **Navigate**: Use arrow keys to browse results.
-3.  **Select**: Choose a result to see details (Seasons/Episodes).
-4.  **Action**:
-    -   **Play**: Opens `mpv` immediately.
-    -   **Download**: Starts a background download. You'll hear a sound when it's done!
+```powershell
+$env:AUTO_START_BACKEND_SHOW_LOGS = '1'  # optional: stream backend logs into the CLI
+python -m cli.main
+```
 
-## 🤝 Credits
+## Configuration (.env)
 
-- Backend powered by [CinePro Backend](https://github.com/cinepro-org/backend)
-- Inspired by [ani-cli-arabic](https://github.com/np4abdou1/ani-cli-arabic)
+Create a `.env` at project root or update `backend/.env`/`cli/.env` (the project now prefers the root `.env`). Key variables:
+
+- `TMDB_API_KEY` — required for TMDB lookups.
+- `PORT` — backend port (default 3000).
+- `BACKEND_URL` — base URL for the backend (e.g. `http://localhost:3000`).
+- `OPENSUBTITLES_API_KEY` — optional subtitle provider key.
+- `DISABLE_CACHE` — set to `true` to disable server-side cache.
+
+Note: `API_URL` was deprecated — use `BACKEND_URL` only.
+
+## Usage
+
+- Search for movies/TV in the CLI using the prompt.
+- Navigate results with arrow keys and press Enter to open details.
+- From a media entry you can: play in `mpv`, download, copy URL, or save to favorites.
+
+Player behavior
+
+- If `yt-dlp` is installed, the CLI prefers `yt-dlp` for complex stream handling.
+- Headers like `Referer` and `User-Agent` are propagated to `mpv`/`yt-dlp` when possible.
+
+Downloads
+
+- Downloads run in background threads; check `cli/downloads/` and `cli/downloads.json` (or the configured storage) for status.
+
+## Troubleshooting
+
+- Backend fails to start: ensure `TMDB_API_KEY` and `PORT` are set in `.env`. The CLI auto-start writes logs to `backend/backend.log` — inspect the last lines when problems occur.
+- "No streams found": enable backend logs (`$env:AUTO_START_BACKEND_SHOW_LOGS = '1'`) and retry; the CLI will surface the last backend log lines when errors happen.
+- `mpv` not found: install `mpv` and ensure it's on your PATH. Without `mpv` you cannot play streams.
+- If `npm start` fails, run the backend manually in `backend/` to see full `npm` errors.
+
+Commands to check backend health (PowerShell):
+
+```powershell
+Invoke-RestMethod http://localhost:3000/
+Invoke-RestMethod http://localhost:3000/proxy/status
+```
+
+## Contributing
+
+See `CONTRIBUTING.md` for guidelines. Basic suggestions:
+
+- Run formatters before committing: `black .` (Python), `npx prettier --write` (JS).
+- Add tests and keep PRs small.
+
+## Development tips and CI
+
+- Add a GitHub Action to run `black`, `isort`, `flake8`, and `npm test` on PRs.
+- Consider adding `pre-commit` hooks to run formatters automatically.
+
+## License
+
+This project includes code from multiple authors. Check the `LICENSE` or repository root for license details.
+
+---
+
+If there's a specific part of the README you'd like expanded (examples, screenshots, architecture diagram), tell me and I'll add it.

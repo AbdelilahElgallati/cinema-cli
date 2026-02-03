@@ -5,24 +5,24 @@ import NodeCache from 'node-cache';
 const cache = new NodeCache({ stdTTL: 10800, checkperiod: 600 });
 
 export function getCacheKey(media) {
-    // TV shows need season and episode info, movies just need the basic ID
-    if (media.type === 'tv') {
-        return `${media.type}_${media.tmdb}_${media.season}_${media.episode}`;
-    }
-    return `${media.type}_${media.tmdb}`;
+  // TV shows need season and episode info, movies just need the basic ID
+  if (media.type === 'tv') {
+    return `${media.type}_${media.tmdb}_${media.season}_${media.episode}`;
+  }
+  return `${media.type}_${media.tmdb}`;
 }
 
 export function getFromCache(key) {
-    // Simple wrapper to grab stuff from cache
-    return cache.get(key);
+  // Simple wrapper to grab stuff from cache
+  return cache.get(key);
 }
 
 export function setToCache(key, data) {
-    // Store the scraped data so we don't have to fetch it again
-    return cache.set(key, data);
+  // Store the scraped data so we don't have to fetch it again
+  return cache.set(key, data);
 }
 
 export function getCacheStats() {
-    // Useful for debugging and seeing how well our cache is performing
-    return cache.getStats();
+  // Useful for debugging and seeing how well our cache is performing
+  return cache.getStats();
 }

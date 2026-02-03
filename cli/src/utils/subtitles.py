@@ -1,6 +1,8 @@
 import os
+
 import requests
 from src.config import OPENSUBTITLES_API_KEY
+
 
 def fetch_arabic_subtitle(title, year=None, season=None, episode=None):
     key = os.getenv("OPENSUBTITLES_API_KEY") or OPENSUBTITLES_API_KEY
@@ -15,7 +17,12 @@ def fetch_arabic_subtitle(title, year=None, season=None, episode=None):
     if episode:
         params["episode_number"] = episode
     try:
-        r = requests.get("https://api.opensubtitles.com/api/v1/subtitles", params=params, headers=headers, timeout=10)
+        r = requests.get(
+            "https://api.opensubtitles.com/api/v1/subtitles",
+            params=params,
+            headers=headers,
+            timeout=10,
+        )
         if r.status_code != 200:
             return None
         items = r.json().get("data") or []
@@ -34,7 +41,12 @@ def fetch_arabic_subtitle(title, year=None, season=None, episode=None):
             file_id = fid
         if not file_id:
             return None
-        dr = requests.post("https://api.opensubtitles.com/api/v1/downloads", json={"file_id": file_id}, headers=headers, timeout=10)
+        dr = requests.post(
+            "https://api.opensubtitles.com/api/v1/downloads",
+            json={"file_id": file_id},
+            headers=headers,
+            timeout=10,
+        )
         if dr.status_code != 200:
             return None
         link = dr.json().get("link")

@@ -1,0 +1,9 @@
+.env
+
+.download_temp/
+
+*.mp4
+*.srt
+
+downloads/
+

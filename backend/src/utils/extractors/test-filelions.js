@@ -4,10 +4,10 @@ import { extract_filelions } from './filelions.js';
 const testUrl = 'https://filelions.to/v/zt7ie6a5cbq7';
 
 (async () => {
-    try {
-        const result = await extract_filelions(testUrl);
-        console.log('Extracted Result:', result);
-    } catch (e) {
-        console.log('Extracted Error:', e);
-    }
+  try {
+    const result = await extract_filelions(testUrl);
+    console.log('Extracted Result:', result);
+  } catch (e) {
+    console.log('Extracted Error:', e);
+  }
 })();
