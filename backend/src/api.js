@@ -112,7 +112,7 @@ export async function scrapeMedia(media) {
   // Validate sources to filter out non-working ones
   // Only validate if we have sources and not in debug mode (to speed up debugging)
   if (files.length > 0 && !shouldDebug) {
-    files = await validateSources(files, 5, 5000);
+    files = await validateSources(files, 20, 2500);
   }
 
   const subtitles = results
