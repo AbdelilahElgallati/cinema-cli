@@ -1,9 +1,56 @@
+# Environment variables
 .env
+.env.local
+.env.*.local
 
+# Downloads / media
 .download_temp/
-
+downloads/
 *.mp4
 *.srt
 
-downloads/
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
 
+# Node
+node_modules/
+
+# Build / packaging
+build/
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Coverage
+coverage/
+
+# Temporary files
+tmp/
+temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Docker
+docker-compose.override.yml
+
+# Vercel
+.vercel/
