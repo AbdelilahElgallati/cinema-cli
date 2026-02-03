@@ -95,7 +95,7 @@ python -m cli.main
 
 ## Configuration (.env)
 
-Create a `.env` at project root or update `backend/.env`/`cli/.env` (the project now prefers the root `.env`). Key variables:
+Create a `.env` at project root. Key variables:
 
 - `TMDB_API_KEY` — required for TMDB lookups.
 - `PORT` — backend port (default 3000).
@@ -103,7 +103,6 @@ Create a `.env` at project root or update `backend/.env`/`cli/.env` (the project
 - `OPENSUBTITLES_API_KEY` — optional subtitle provider key.
 - `DISABLE_CACHE` — set to `true` to disable server-side cache.
 
-Note: `API_URL` was deprecated — use `BACKEND_URL` only.
 
 ## Usage
 
@@ -127,12 +126,6 @@ Downloads
 - `mpv` not found: install `mpv` and ensure it's on your PATH. Without `mpv` you cannot play streams.
 - If `npm start` fails, run the backend manually in `backend/` to see full `npm` errors.
 
-Commands to check backend health (PowerShell):
-
-```powershell
-Invoke-RestMethod http://localhost:3000/
-Invoke-RestMethod http://localhost:3000/proxy/status
-```
 
 ## Contributing
 
@@ -149,7 +142,3 @@ See `CONTRIBUTING.md` for guidelines. Basic suggestions:
 ## License
 
 This project includes code from multiple authors. Check the `LICENSE` or repository root for license details.
-
----
-
-If there's a specific part of the README you'd like expanded (examples, screenshots, architecture diagram), tell me and I'll add it.
