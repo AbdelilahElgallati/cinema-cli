@@ -297,6 +297,17 @@ app.get('/movie/:tmdbId', async (req, res) => {
 });
 
 app.get('/tv/:tmdbId', async (req, res) => {
+  console.log('[TV REQUEST]', {
+    tmdbId: req.params.tmdbId,
+    season: req.query.s,
+    episode: req.query.e,
+    headers: {
+      'x-client-type': req.headers['x-client-type'],
+      'X-Client-Type': req.headers['X-Client-Type'],
+      'user-agent': req.headers['user-agent'],
+    },
+  });
+
   if (
     !checkIfPossibleTmdbId(req.params.tmdbId) ||
     !checkIfPossibleTmdbId(req.query.s) ||
@@ -318,6 +329,18 @@ app.get('/tv/:tmdbId', async (req, res) => {
     return handleErrorResponse(res, output);
   }
   const processedOutput = processApiResponse(output, `${req.protocol}://${req.get('host')}`, req);
+
+  console.log('[TV RESPONSE]', {
+    filesCount: processedOutput.files?.length || 0,
+    subtitlesCount: processedOutput.subtitles?.length || 0,
+    firstFile: processedOutput.files?.[0]
+      ? {
+        provider: processedOutput.files[0].provider,
+        hasFile: !!processedOutput.files[0].file,
+        filePreview: processedOutput.files[0].file?.substring(0, 100),
+      }
+      : null,
+  });
 
   res.status(200).json(processedOutput);
 });

@@ -1420,6 +1420,18 @@ class CinemaCLI:
             files = data.get("files", [])
             subtitles = data.get("subtitles", [])
 
+            # Fix malformed URLs (e.g., https:/// with triple slash)
+            valid_files = []
+            for f in files:
+                url = f.get("file", "")
+                if url.startswith("https:///") or url.startswith("http:///"):
+                    # Attempt to fix it
+                    fixed_url = url.replace("https:///", "https://").replace("http:///", "http://")
+                    f["file"] = fixed_url
+                valid_files.append(f)
+            
+            files = valid_files
+
             if not files:
                 console.print(
                     f"[yellow]No sources found for {title}. Skipping...[/yellow]"
@@ -1491,6 +1503,12 @@ class CinemaCLI:
             console.print("[red]No streams found.[/red]")
             time.sleep(1.5)
             return False
+
+        # Fix malformed URLs (e.g., https:/// -> https://)
+        for f in files:
+            url = f.get("file", "")
+            if url.startswith("https:///") or url.startswith("http:///"):
+                f["file"] = url.replace("https:///", "https://").replace("http:///", "http://")
 
         # Resume playback support
         start_time = 0
@@ -1573,6 +1591,7 @@ class CinemaCLI:
                 selected.get("headers"),
                 meta,
                 start_time=start_time,
+                settings=self.settings,
             )
             if isinstance(stats, dict) and playback_key:
                 self.playback[playback_key] = stats

@@ -84,32 +84,76 @@ class APIClient:
 
     # ── Backend Sources ─────────────────────────────────────
     def get_sources_api(self, tmdb_id, media_type, season=None, episode=None):
+        import json
+        from pathlib import Path
+        
+        # Setup logging
+        log_dir = Path.home() / ".cinema-cli"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / "api_debug.log"
+        
         base = self.settings.get("backend", BACKEND_URL)
         if media_type == "movie":
             url = f"{base}/movie/{tmdb_id}"
         else:
             url = f"{base}/tv/{tmdb_id}?s={season}&e={episode}"
+        
+        # Log request
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"REQUEST: {url}\n")
+            f.write(f"Headers: {dict(self.session.headers)}\n")
+        
+        console.print(f"[dim]DEBUG: Requesting {url}[/dim]")
+        
         try:
             resp = self.session.get(url, timeout=self.timeout)
+            console.print(f"[dim]DEBUG: Status code: {resp.status_code}[/dim]")
+            
+            # Log response status
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"RESPONSE STATUS: {resp.status_code}\n")
+            
             if resp.status_code != 200:
                 try:
                     body = resp.text
                 except Exception:
                     body = "<unreadable body>"
+                
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"ERROR BODY: {body}\n")
+                
                 console.print(
                     f"[bold red]Backend error {resp.status_code} for {url}: {body}[/bold red]"
                 )
                 self._show_backend_logs()
                 return {}
+            
             data = resp.json()
-            if not data or (isinstance(data, dict) and not data.get("files")):
+            files = data.get("files", [])
+            
+            # Log full response
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"RESPONSE DATA:\n{json.dumps(data, indent=2)}\n")
+                f.write(f"FILES COUNT: {len(files)}\n")
+                if files:
+                    f.write(f"FIRST FILE: {json.dumps(files[0], indent=2)}\n")
+            
+            console.print(f"[dim]DEBUG: Received {len(files)} files from backend[/dim]")
+            
+            if not data or (isinstance(data, dict) and not files):
                 console.print(
-                    f"[yellow]Warning: backend returned no files for {url}. Response: {data}[/yellow]"
+                    f"[yellow]Warning: backend returned no files for {url}. Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}[/yellow]"
                 )
                 self._show_backend_logs()
             return data
-        except Exception:
-            console.print(f"[bold red]Error contacting backend at {url}[/bold red]")
+        except Exception as e:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"EXCEPTION: {str(e)}\n")
+                import traceback
+                f.write(f"TRACEBACK:\n{traceback.format_exc()}\n")
+            
+            console.print(f"[bold red]Error contacting backend at {url}: {e}[/bold red]")
             self._show_backend_logs()
             return {}
 

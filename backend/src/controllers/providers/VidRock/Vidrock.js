@@ -105,21 +105,26 @@ export async function getVidRock(media) {
 
     const formattedSources = Object.values(sources)
       .filter((source) => source && source.url)
-      .map((source) => ({
-        file: source.url,
-        type: source.url.includes('.m3u8')
-          ? 'hls'
-          : source.url.includes('.mp4')
-            ? 'mp4'
-            : 'unknown',
-        lang: languageMap[source.language] || source.language,
-        headers: {
-          Referer: `${DOMAIN}/movie/${media.tmdb}`,
-          Origin: DOMAIN,
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        },
-      }));
+      .map((source) => {
+        // Fix malformed URLs with triple slashes (https:///) -> (https://)
+        let normalizedUrl = source.url.replace(/^(https?:)\/\/\/+/, '$1//');
+
+        return {
+          file: normalizedUrl,
+          type: normalizedUrl.includes('.m3u8')
+            ? 'hls'
+            : normalizedUrl.includes('.mp4')
+              ? 'mp4'
+              : 'unknown',
+          lang: languageMap[source.language] || source.language,
+          headers: {
+            Referer: `${DOMAIN}/movie/${media.tmdb}`,
+            Origin: DOMAIN,
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          },
+        };
+      });
 
     if (formattedSources.length === 0) {
       return new ErrorObject(
