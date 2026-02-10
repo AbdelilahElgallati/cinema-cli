@@ -4,12 +4,12 @@ import requests
 from src.config import OPENSUBTITLES_API_KEY
 
 
-def fetch_arabic_subtitle(title, year=None, season=None, episode=None):
+def fetch_subtitle(title, year=None, season=None, episode=None, language="ar"):
     key = os.getenv("OPENSUBTITLES_API_KEY") or OPENSUBTITLES_API_KEY
     if not key:
         return None
     headers = {"Api-Key": key}
-    params = {"query": title, "languages": "ar"}
+    params = {"query": title, "languages": language}
     if year:
         params["year"] = year
     if season:

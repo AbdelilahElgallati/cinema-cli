@@ -1,11 +1,7 @@
-import atexit
 import html
 import os
-import subprocess
-import sys
+import textwrap
 import time
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from prompt_toolkit import Application
 from prompt_toolkit.formatted_text import HTML
@@ -19,17 +15,12 @@ from rich.align import Align
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
-from src.config import (
-    ACCENT,
-    BACKEND_URL,
-    BG,
-    PRIMARY,
-    SECONDARY,
-    SUCCESS,
-    TEXT,
-    WARNING,
-    console,
-)
+
+
+def _colors():
+    """Get live theme colors from config."""
+    import src.config as cfg
+    return cfg.PRIMARY, cfg.SECONDARY, cfg.ACCENT, cfg.SUCCESS, cfg.TEXT, cfg.WARNING, cfg.BG
 
 
 def clear():
@@ -38,92 +29,36 @@ def clear():
 
 def print_header(subtitle=""):
     clear()
-    title = Text("🎬 CINEMA CLI", style=f"bold {PRIMARY}")
+    P, S, A, Su, T, W, B = _colors()
+    title = Text("🎬 CINEMA CLI", style=f"bold {P}")
     if subtitle:
-        title.append(f" | {subtitle}", style=f"italic {ACCENT}")
+        title.append(f" | {subtitle}", style=f"italic {A}")
 
-    console.print(Panel(Align.center(title), border_style=PRIMARY, box=box.DOUBLE))
+    from src.config import console
+    console.print(Panel(Align.center(title), border_style=P, box=box.DOUBLE))
     console.print()
 
 
 def show_splash():
     clear()
+    P, S, A, Su, T, W, B = _colors()
+    from src.config import console
+
     art = f"""
-[bold {PRIMARY}]
+[bold {P}]
  ██████╗██╗███╗   ██╗███████╗███████╗  ██╗    ██╗
 ██╔════╝██║████╗  ██║██╔════╝██╔════╝  ██║    ██║
 ██║     ██║██╔██╗ ██║█████╗  ███████╗  ██║ █╗ ██║
 ██║     ██║██║╚██╗██║██╔══╝  ╚════██║  ██║███╗██║
 ╚██████╗██║██║ ╚████║███████╗███████║  ╚███╔███╔╝
  ╚═════╝╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝   ╚══╝╚══╝ 
-[/bold {PRIMARY}]
-[italic {ACCENT}]      Elevate Your Movie Experience - v1.0.0[/italic {ACCENT}]
+[/bold {P}]
+[italic {A}]      Elevate Your Movie Experience - v2.0.0[/italic {A}]
     """
     console.print(Align.center(art))
 
-    # Ensure local backend is running (for localhost BACKEND_URL)
-    def _is_backend_running(url: str) -> bool:
-        try:
-            req = Request(
-                url.rstrip("/") + "/", headers={"User-Agent": "cinema-cli/1.0"}
-            )
-            with urlopen(req, timeout=1) as resp:
-                return resp.status == 200
-        except (URLError, HTTPError, ValueError):
-            return False
-
-    def _maybe_start_backend(url: str):
-        try:
-            host = url.split("://")[-1].split(":")[0]
-        except Exception:
-            host = ""
-
-        if host not in ("localhost", "127.0.0.1", ""):
-            return None
-
-        if _is_backend_running(url):
-            return None
-
-        backend_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "backend")
-        )
-        show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
-        stdout = None if show_logs else subprocess.DEVNULL
-        stderr = None if show_logs else subprocess.DEVNULL
-
-        try:
-            proc = subprocess.Popen(
-                "npm start", cwd=backend_dir, shell=True, stdout=stdout, stderr=stderr
-            )
-        except Exception:
-            try:
-                proc = subprocess.Popen(
-                    ["node", "index.js"], cwd=backend_dir, stdout=stdout, stderr=stderr
-                )
-            except Exception:
-                return None
-
-        # wait briefly for server to come up
-        for _ in range(10):
-            if _is_backend_running(url):
-                return proc
-            time.sleep(0.5)
-
-        return proc
-
-    # Attempt auto-start; keep process reference to cleanup later
-    _backend_proc = _maybe_start_backend(BACKEND_URL)
-    if _backend_proc:
-        atexit.register(
-            lambda: (
-                _backend_proc.terminate()
-                if _backend_proc and _backend_proc.poll() is None
-                else None
-            )
-        )
-
     with Progress(
-        SpinnerColumn(spinner_name="dots", style=ACCENT),
+        SpinnerColumn(spinner_name="dots", style=A),
         TextColumn("[progress.description]{task.description}"),
         console=console,
         transient=True,
@@ -137,6 +72,7 @@ def show_splash():
 
 
 def format_item(item):
+    P, S, A, Su, T, W, B = _colors()
     title = item.get("title") or item.get("name", "Unknown")
     date = item.get("release_date") or item.get("first_air_date", "????-??-??")
     year = date[:4]
@@ -145,13 +81,15 @@ def format_item(item):
     )
     rating = item.get("vote_average", 0)
     return (
-        f"[bold {TEXT}]{title}[/bold {TEXT}] ({year}) | ⭐ {rating:.1f} | {media_type}"
+        f"[bold {T}]{title}[/bold {T}] ({year}) | ⭐ {rating:.1f} | {media_type}"
     )
 
 
 def selection_menu(items, title, show_details=True, formatter=None, default_index=0):
     if not items:
         return None
+
+    P, S, A, Su, T, W, B = _colors()
 
     clear()
     selected_index = default_index
@@ -204,7 +142,6 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
         res.append(("class:title", f" {title} \n"))
         res.append(("class:border", "─" * 60 + "\n"))
 
-        # Show a window of items
         start = max(0, selected_index - 5)
         end = min(len(items), start + 12)
         if end - start < 12:
@@ -213,9 +150,8 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
         for i in range(start, end):
             item = items[i]
             display = formatter(item) if formatter else format_item(item)
-            # Strip rich tags for prompt_toolkit display or use HTML
-            clean_display = display.replace(f"[bold {TEXT}]", "").replace(
-                f"[/bold {TEXT}]", ""
+            clean_display = display.replace(f"[bold {T}]", "").replace(
+                f"[/bold {T}]", ""
             )
 
             if i == selected_index:
@@ -239,7 +175,6 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
         item = items[selected_index]
         overview = item.get("overview", "No description available.")
 
-        # Wrap overview text at 50 characters for better readability
         def wrap_text(text, width=50):
             import textwrap
 
@@ -264,19 +199,17 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
 
     style = Style.from_dict(
         {
-            "title": f"bold {PRIMARY}",
-            "border": f"{PRIMARY}",
-            "selected": f"bg:{PRIMARY} fg:#ffffff bold",
-            "item": f"{TEXT}",
-            "help": f"italic {ACCENT}",
-            "title": f"bold {ACCENT}",
-            "rating": f"{WARNING}",
-            "pop": f"{SUCCESS}",
-            "overview": f"{TEXT}",
+            "title": f"bold {A}",
+            "border": f"{P}",
+            "selected": f"bg:{P} fg:#ffffff bold",
+            "item": f"{T}",
+            "help": f"italic {A}",
+            "rating": f"{W}",
+            "pop": f"{Su}",
+            "overview": f"{T}",
         }
     )
 
-    # Layout with details on the right
     body = VSplit(
         [
             Window(content=FormattedTextControl(get_formatted_text), width=60),
@@ -295,6 +228,8 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
 def multi_selection_menu(items, title, formatter=None):
     if not items:
         return []
+
+    P, S, A, Su, T, W, B = _colors()
 
     clear()
     selected_index = 0
@@ -349,8 +284,8 @@ def multi_selection_menu(items, title, formatter=None):
         for i in range(start, end):
             item = items[i]
             display = formatter(item) if formatter else format_item(item)
-            clean_display = display.replace(f"[bold {TEXT}]", "").replace(
-                f"[/bold {TEXT}]", ""
+            clean_display = display.replace(f"[bold {T}]", "").replace(
+                f"[/bold {T}]", ""
             )
 
             checkbox = " [x]" if i in checked_indices else " [ ]"
@@ -372,11 +307,11 @@ def multi_selection_menu(items, title, formatter=None):
 
     style = Style.from_dict(
         {
-            "title": f"bold {PRIMARY}",
-            "border": f"{PRIMARY}",
-            "selected": f"bg:{PRIMARY} fg:#ffffff bold",
-            "item": f"{TEXT}",
-            "help": f"italic {ACCENT}",
+            "title": f"bold {P}",
+            "border": f"{P}",
+            "selected": f"bg:{P} fg:#ffffff bold",
+            "item": f"{T}",
+            "help": f"italic {A}",
         }
     )
 

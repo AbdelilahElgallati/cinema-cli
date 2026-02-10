@@ -6,7 +6,7 @@ from rich.align import Align
 from rich.panel import Panel
 from src.config import SUCCESS, console
 from src.ui.ui import clear
-from src.utils.subtitles import fetch_arabic_subtitle
+from src.utils.subtitles import fetch_subtitle
 
 
 def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=0):
@@ -96,7 +96,7 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
 
                 import requests
 
-                temp_dir = os.path.join(os.getcwd(), ".download_temp")
+                temp_dir = os.path.join(os.path.expanduser("~"), ".cinema-cli", "temp")
                 os.makedirs(temp_dir, exist_ok=True)
                 sub_url = ar[0]["url"]
                 sub_ext = (
@@ -123,7 +123,7 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
         try:
             import os
 
-            temp_dir = os.path.join(os.getcwd(), ".download_temp")
+            temp_dir = os.path.join(os.path.expanduser("~"), ".cinema-cli", "temp")
             os.makedirs(temp_dir, exist_ok=True)
             yr = None
             sn = None
@@ -132,7 +132,7 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
                 yr = meta.get("year")
                 sn = meta.get("season")
                 epn = meta.get("episode")
-            res = fetch_arabic_subtitle(title, year=yr, season=sn, episode=epn)
+            res = fetch_subtitle(title, year=yr, season=sn, episode=epn)
             if res:
                 content, sub_ext = res
                 base = (

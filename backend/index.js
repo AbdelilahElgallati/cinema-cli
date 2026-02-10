@@ -224,7 +224,25 @@ import { getCacheStats } from './src/cache/cache.js';
 import { startup } from './src/utils/startup.js';
 import { fileURLToPath } from 'url';
 
-const PORT = process.env.PORT || 3000;
+const getPort = () => {
+  if (process.env.PORT) return process.env.PORT;
+  if (process.env.BACKEND_URL) {
+    try {
+      // Handle localhost URLs that might not have protocol for some users (resilience)
+      let urlStr = process.env.BACKEND_URL;
+      if (!urlStr.startsWith('http')) {
+        urlStr = `http://${urlStr}`;
+      }
+      const url = new URL(urlStr);
+      if (url.port) return url.port;
+    } catch (e) {
+      console.warn('Failed to parse BACKEND_URL for port:', e.message);
+    }
+  }
+  return 3000;
+};
+
+const PORT = getPort();
 
 const app = express();
 
