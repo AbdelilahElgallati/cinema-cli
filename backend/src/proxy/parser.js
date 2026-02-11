@@ -17,7 +17,7 @@ function extractOriginalUrl(proxyUrl) {
   try {
     const url = new URL(proxyUrl);
 
-    // Pattern 1: /proxy/encodedUrl (like hls1.vid1.site/proxy/...  
+    // Pattern 1: /proxy/encodedUrl (like hls1.vid1.site/proxy/...)
     if (url.pathname.includes('/proxy/')) {
       const proxyMatch = url.pathname.match(/\/proxy\/(.+)$/);
       if (proxyMatch) {
@@ -29,28 +29,13 @@ function extractOriginalUrl(proxyUrl) {
             break;
           }
         }
-        // Validate extracted URL
-        try {
-          new URL(decoded);
-          return decoded;
-        } catch {
-          // Extracted URL is invalid, return original
-          return proxyUrl;
-        }
+        return decoded;
       }
     }
 
     // for patterns like ?url=encodedUrl (like madplay.site/api/holly/proxy?url=...)
     if (url.searchParams.has('url')) {
-      const extracted = decodeURIComponent(url.searchParams.get('url'));
-      // Validate extracted URL
-      try {
-        new URL(extracted);
-        return extracted;
-      } catch {
-        // Extracted URL is invalid, return original
-        return proxyUrl;
-      }
+      return decodeURIComponent(url.searchParams.get('url'));
     }
 
     // Pattern 3: Other common proxy patterns using regex
@@ -64,15 +49,7 @@ function extractOriginalUrl(proxyUrl) {
     for (const pattern of commonProxyPatterns) {
       const match = proxyUrl.match(pattern);
       if (match) {
-        const extracted = decodeURIComponent(match[1]);
-        // Validate extracted URL
-        try {
-          new URL(extracted);
-          return extracted;
-        } catch {
-          // Extracted URL is invalid, continue to next pattern
-          continue;
-        }
+        return decodeURIComponent(match[1]);
       }
     }
 

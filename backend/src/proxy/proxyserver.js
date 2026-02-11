@@ -377,34 +377,17 @@ export function createProxyRoutes(app) {
 export function processApiResponse(apiResponse, serverUrl, req) {
   if (!apiResponse.files) return apiResponse;
 
-  // Log CLI detection
-  const isCLILower = req.headers['x-client-type'] === 'cinema-cli';
-  const isCLIUpper = req.headers['X-Client-Type'] === 'cinema-cli';
-  console.log('[PROCESS API] CLI Detection:', {
-    'x-client-type': req.headers['x-client-type'],
-    'X-Client-Type': req.headers['X-Client-Type'],
-    isCLILower,
-    isCLIUpper,
-    willProxy: !isCLILower && !isCLIUpper,
-  });
-
   const processedFiles = apiResponse.files.map((file) => {
     if (!file.file || typeof file.file !== 'string') return file;
 
     let finalUrl = file.file;
     let proxyHeaders = file.headers || {};
 
-    // Check if the request is coming from the CLI (which can handle raw URLs)
-    // Headers are case-insensitive, so check both variations
-    const isCLI =
-      req.headers['x-client-type'] === 'cinema-cli' ||
-      req.headers['X-Client-Type'] === 'cinema-cli';
+    // Extract original URL if it's wrapped in external proxy
+    finalUrl = extractOriginalUrl(finalUrl);
 
-    // Only extract original URL if NOT from CLI
-    // CLI needs raw URLs, and extractOriginalUrl can corrupt valid URLs
-    if (!isCLI) {
-      finalUrl = extractOriginalUrl(finalUrl);
-    }
+    // Check if the request is coming from the CLI (which can handle raw URLs)
+    const isCLI = req.headers['x-client-type'] === 'cinema-cli';
 
     if (isCLI) {
       // If it's the CLI, return the raw URL and headers directly
@@ -469,10 +452,7 @@ export function processApiResponse(apiResponse, serverUrl, req) {
     if (!sub.url || typeof sub.url !== 'string') return sub;
 
     // Check if the request is coming from the CLI (which can handle raw URLs)
-    // Headers are case-insensitive, so check both variations
-    const isCLI =
-      req.headers['x-client-type'] === 'cinema-cli' ||
-      req.headers['X-Client-Type'] === 'cinema-cli';
+    const isCLI = req.headers['x-client-type'] === 'cinema-cli';
 
     if (isCLI) {
       // If it's the CLI, return the raw URL directly

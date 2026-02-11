@@ -4,18 +4,35 @@ import requests
 from src.config import OPENSUBTITLES_API_KEY
 
 
-def fetch_subtitle(title, year=None, season=None, episode=None, language="ar"):
+def fetch_subtitle(title, year=None, season=None, episode=None, lang="ar"):
     key = os.getenv("OPENSUBTITLES_API_KEY") or OPENSUBTITLES_API_KEY
     if not key:
+        from src.config import console
+        from src.ui.theme import theme
+        # console.print(f"[{theme.warning}]Warning: OPENSUBTITLES_API_KEY not set. Cannot fetch fallback subtitles.[/{theme.warning}]")
         return None
-    headers = {"Api-Key": key}
-    params = {"query": title, "languages": language}
-    if year:
-        params["year"] = year
-    if season:
+    headers = {
+        "Api-Key": key,
+        "User-Agent": "Cinema-CLI v1.1",
+        "Content-Type": "application/json"
+    }
+    params = {"query": title, "languages": lang}
+    
+    # If it's a series search, sometimes 'query' is better as just the show name
+    # especially if season/episode are provided.
+    if season and episode:
+        import re
+        # Precise query for episodes: Show Title Season X Episode Y
+        clean_title = re.sub(r'S\d+E\d+.*', '', title, flags=re.IGNORECASE).strip()
+        params["query"] = clean_title
         params["season_number"] = season
-    if episode:
         params["episode_number"] = episode
+    
+    # Debug log
+    from src.config import console
+    from src.ui.theme import theme as ui_theme
+    # console.print(f"[{ui_theme.accent}]OS Search: {params.get('query')} S{params.get('season_number')}E{params.get('episode_number')} ({lang})[/{ui_theme.accent}]")
+
     try:
         r = requests.get(
             "https://api.opensubtitles.com/api/v1/subtitles",
@@ -24,6 +41,7 @@ def fetch_subtitle(title, year=None, season=None, episode=None, language="ar"):
             timeout=10,
         )
         if r.status_code != 200:
+            # console.print(f"[red]OS API Error: {r.status_code}[/red]")
             return None
         items = r.json().get("data") or []
         if not items:

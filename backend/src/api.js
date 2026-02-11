@@ -111,9 +111,8 @@ export async function scrapeMedia(media) {
 
   // Validate sources to filter out non-working ones
   // Only validate if we have sources and not in debug mode (to speed up debugging)
-  // Can be disabled via DISABLE_SOURCE_VALIDATION env var for troubleshooting
-  if (files.length > 0 && !shouldDebug && !process.env.DISABLE_SOURCE_VALIDATION) {
-    files = await validateSources(files, 20, 5000); // Increased timeout from 2500ms to 5000ms
+  if (files.length > 0 && !shouldDebug) {
+    files = await validateSources(files, 20, 2500);
   }
 
   const subtitles = results

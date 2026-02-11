@@ -26,8 +26,6 @@ export function startup() {
       );
     });
 
-  // No longer strictly enforcing PORT check here as index.js handles fallback/default
-  /*
   const PORT = process.env.PORT;
   if (!PORT) {
     throw new ErrorObject(
@@ -39,5 +37,4 @@ export function startup() {
       false
     );
   }
-  */
 }
