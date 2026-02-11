@@ -56,8 +56,11 @@ function decodeHunter(h, u, n, t, e, r = '') {
 }
 
 export async function getMultiembed(params) {
-  const { imdb } = params;
+  const { imdb, season, episode } = params;
   let baseUrl = `https://multiembed.mov/?video_id=${imdb}`;
+  if (season && episode) {
+    baseUrl += `&s=${season}&e=${episode}`;
+  }
 
   try {
     if (baseUrl.includes('multiembed')) {
@@ -178,6 +181,7 @@ export async function getMultiembed(params) {
     return {
       files: {
         file: videoUrl,
+        quality: '720p',
         type: 'hls',
         lang: 'en',
         headers: {

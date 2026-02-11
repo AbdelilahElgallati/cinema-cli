@@ -416,6 +416,7 @@ class CinemaApp:
                 {"name": f"🎬 Movie Template: {self.settings.filename_template_movie}", "val": "movie_tmp"},
                 {"name": f"📺 TV Template: {self.settings.filename_template_tv}", "val": "tv_tmp"},
                 {"name": f"📁 Local Library Paths: ({len(paths)})", "val": "paths"},
+                {"name": f"📥 IDM Integration: {'ON' if self.settings.use_idm else 'OFF'}", "val": "idm"},
                 {"name": f"🎨 Theme: {current_theme.title()}", "val": "theme"},
                 {"name": f"💬 Subtitle Languages: {', '.join(subs).upper()}", "val": "subs"},
                 {"name": "🔙 Back to Main Menu", "val": "back"},
@@ -426,6 +427,13 @@ class CinemaApp:
                 break
                 
             choice = sel["value"]["val"]
+            if choice == "idm":
+                self.settings.use_idm = not self.settings.use_idm
+                status = "Enabled" if self.settings.use_idm else "Disabled"
+                self.console.print(f"[green]IDM Integration: {status}[/green]")
+                time.sleep(1)
+                continue
+
             print_header("Settings")
             
             if choice == "backend":

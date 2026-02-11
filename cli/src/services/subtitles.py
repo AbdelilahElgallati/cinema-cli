@@ -9,7 +9,7 @@ class SubtitleManager:
         self.temp_dir = os.path.join(os.getcwd(), temp_dir)
         os.makedirs(self.temp_dir, exist_ok=True)
 
-    def get_subtitles(self, title, source_subtitles, match_data={}, preferred_langs=None):
+    def get_subtitles(self, title, source_subtitles, match_data={}, preferred_langs=None, silent=False):
         """
         Tries to find subtitles for all preferred languages.
         Returns a list of local paths.
@@ -20,33 +20,35 @@ class SubtitleManager:
             preferred_langs = settings.subtitle_languages
             
         collected_paths = []
-        
-        # 1. Check provided source subtitles
-        for lang in preferred_langs:
-            # console.print(f"[{theme.accent}]Checking source for {lang}...[/{theme.accent}]")
-            # Flexible matching for lang code
+        # Ensure Arabic and English are prioritized at the start if not already
+        langs = list(preferred_langs)
+        for prioritize in ["en", "ar"]:
+            if prioritize in langs:
+                langs.remove(prioritize)
+            langs.insert(0, prioritize)
+            
+        for lang in langs:
+            if not silent:
+                console.print(f"[{theme.accent}]Searching for {lang} subtitles...[/{theme.accent}]")
+            # 1. Check provided source subtitles
             candidates = [
                 s for s in source_subtitles 
                 if self._lang_match(s.get("lang"), lang)
             ]
             if candidates:
-                # Pick first
                 sub = candidates[0]
                 url = sub.get("url") or sub.get("file")
                 if url:
                     path = self._download_sub(url, title, lang)
                     if path: 
-                        # console.print(f"[{theme.success}]Found {lang} in source.[/{theme.success}]")
+                        if not silent:
+                            console.print(f"[{theme.success}]Found {lang} in source.[/{theme.success}]")
                         collected_paths.append(path)
-                        continue # Found one for this lang, move to next lang
+                        continue 
             
             # 2. OpenSubtitles fallback
-            # console.print(f"[{theme.warning}]{lang} not in source, trying OpenSubtitles fallback...[/{theme.warning}]")
             from src.utils.subtitles import fetch_subtitle
-            
-            # For OpenSubtitles, if it's a TV show, use the series name from match_data if possible
             search_title = match_data.get("series_name") or title
-            
             res = fetch_subtitle(
                 search_title, 
                 year=match_data.get("year"), 
@@ -62,12 +64,22 @@ class SubtitleManager:
                     with open(path, "wb") as f:
                         f.write(content)
                     collected_paths.append(path)
-                    # console.print(f"[{theme.success}]Successfully fetched {lang} fallback from OpenSubtitles.[/{theme.success}]")
+                    if not silent:
+                        console.print(f"[{theme.success}]Fetched {lang} from OpenSubtitles.[/{theme.success}]")
                 except Exception:
                     pass
-            else:
-                # console.print(f"[{theme.warning}]No {lang} subtitles found on OpenSubtitles.[/{theme.warning}]")
-                pass
+        
+        # FINAL FALLBACK: If still no subtitles for preferred langs, take the first one available from source
+        if not collected_paths and source_subtitles:
+            if not silent:
+                console.print(f"[{theme.warning}]No preferred subs found. Using first available...[/{theme.warning}]")
+            sub = source_subtitles[0]
+            url = sub.get("url") or sub.get("file")
+            lang = sub.get("lang", "any")
+            if url:
+                path = self._download_sub(url, title, lang)
+                if path:
+                    collected_paths.append(path)
         
         return collected_paths
 

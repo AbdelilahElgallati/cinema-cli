@@ -29,7 +29,7 @@ export async function getTwoEmbed(params) {
   const { tmdb, season, episode } = params;
   const url =
     season && episode
-      ? `${DOMAIN}/embedtv/${tmdb}&s=${season}&e=${episode}`
+      ? `${DOMAIN}/embedtv/${tmdb}?s=${season}&e=${episode}`
       : `${DOMAIN}/embed/${tmdb}`;
 
   try {

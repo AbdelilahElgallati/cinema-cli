@@ -637,6 +637,7 @@ def download_menu(manager):
             icon = "⏳" # default
             if status == "pending": icon = "⏳"
             elif status == "downloading": icon = "🚀"
+            elif status == "processing": icon = "⚙️ "
             elif status == "completed": icon = "✅"
             elif status == "error": icon = "❌"
             
@@ -662,6 +663,7 @@ def download_menu(manager):
             if i != selected_index:
                 if status == "completed": s_style = "class:completed"
                 elif status == "downloading": s_style = "class:downloading"
+                elif status == "processing": s_style = "class:processing"
                 elif status == "error": s_style = "class:error"
                 else: s_style = "class:item"
 
@@ -704,6 +706,7 @@ def download_menu(manager):
         "item": f"{theme.text}",
         "completed": f"fg:{theme.success}",
         "downloading": f"fg:{theme.accent} bold",
+        "processing": f"fg:{theme.warning} italic",
         "error": f"fg:{theme.warning} bold",
     }
     

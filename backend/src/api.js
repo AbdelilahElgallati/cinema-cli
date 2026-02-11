@@ -97,28 +97,34 @@ export async function scrapeMedia(media) {
   let files = results
     .filter(({ data }) => data && !(data instanceof Error || data instanceof ErrorObject))
     .flatMap(({ data, provider }) => {
+      if (!data || !data.files) return [];
       const fileList = Array.isArray(data.files) ? data.files : [data.files];
-      return fileList.map((f) => ({ ...f, provider }));
+      return fileList
+        .filter((f) => f && typeof f === 'object' && (f.file || f.url))
+        .map((f) => ({ ...f, provider, file: f.file || f.url }));
     })
     .filter(
       (file, index, self) =>
         file &&
         file.file &&
         typeof file.file === 'string' &&
-        file.file.includes('https://') &&
+        (file.file.includes('https://') || file.file.includes('http://')) &&
         self.findIndex((f) => f.file === file.file) === index
     );
 
   // Validate sources to filter out non-working ones
   // Only validate if we have sources and not in debug mode (to speed up debugging)
+  // DISABLE BACKEND VALIDATION - CLI already does this and backend might be blocked
+  /*
   if (files.length > 0 && !shouldDebug) {
     files = await validateSources(files, 20, 2500);
   }
+  */
 
   const subtitles = results
-    .filter(({ data }) => data && !(data instanceof Error || data instanceof ErrorObject))
+    .filter(({ data }) => data && data.subtitles && !(data instanceof Error || data instanceof ErrorObject))
     .flatMap(({ data }) => data.subtitles)
-    .filter((sub, index, self) => sub.url && self.findIndex((s) => s.url === sub.url) === index);
+    .filter((sub, index, self) => sub && sub.url && self.findIndex((s) => s.url === sub.url) === index);
   // Here comes the big boy to loook for nothing okay here you go
   // We need finalResult coz you can't cache what doesn't exist yet - lowkey just consolidating the return logic
   // Build it once, cache it, return it - way cleaner than scattered returns everywhere

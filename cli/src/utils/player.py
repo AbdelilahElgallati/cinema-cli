@@ -64,12 +64,9 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
         mpv_args.insert(1, "--ytdl")
         
         if headers:
-            header_list = []
             for key, value in headers.items():
                 if "," not in str(value):
-                    header_list.append(f"{key}: {value}")
-            if header_list:
-                mpv_args.append(f"--ytdl-raw-options=http-header-fields={','.join(header_list)}")
+                    mpv_args.append(f"--ytdl-raw-options=add-header={key}:{value}")
     elif headers:
         ua = headers.get("User-Agent") or headers.get("user-agent")
         if ua:
@@ -102,6 +99,9 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
 
     # Launch Process
     try:
+        if os.getenv("DEBUG"):
+             console.print(f"[dim]Args: {' '.join(mpv_args)}[/dim]")
+
         process = subprocess.Popen(
             mpv_args,
             stdout=subprocess.PIPE,
@@ -113,12 +113,14 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
 
         position = 0
         duration = 0
+        output_buffer = []
 
         while True:
             line = process.stdout.readline()
             if not line:
                 break
-
+            
+            output_buffer.append(line)
             if "STATUS:" in line:
                 try:
                     parts = line.split("STATUS:")[1].strip().split("/")
@@ -130,8 +132,17 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
                             duration = d
                 except:
                     pass
+            elif "Error" in line or "failed" in line.lower():
+                 # Keep track of errors but don't stop yet
+                 pass
 
         process.wait()
+        
+        if process.returncode != 0 and process.returncode is not None:
+            console.print(f"\n[bold red]MPV exited with code {process.returncode}[/bold red]")
+            # Show last 10 lines of output if it failed
+            console.print("[dim]" + "".join(output_buffer[-10:]) + "[/dim]")
+            time.sleep(3)
 
         return {
             "position": position,
@@ -140,7 +151,7 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
         }
 
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error starting MPV: {e}[/red]")
         time.sleep(2)
         return None
 

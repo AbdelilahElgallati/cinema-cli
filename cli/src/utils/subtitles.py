@@ -38,7 +38,7 @@ def fetch_subtitle(title, year=None, season=None, episode=None, lang="ar"):
             "https://api.opensubtitles.com/api/v1/subtitles",
             params=params,
             headers=headers,
-            timeout=10,
+            timeout=5,
         )
         if r.status_code != 200:
             # console.print(f"[red]OS API Error: {r.status_code}[/red]")
@@ -63,14 +63,14 @@ def fetch_subtitle(title, year=None, season=None, episode=None, lang="ar"):
             "https://api.opensubtitles.com/api/v1/downloads",
             json={"file_id": file_id},
             headers=headers,
-            timeout=10,
+            timeout=5,
         )
         if dr.status_code != 200:
             return None
         link = dr.json().get("link")
         if not link:
             return None
-        sr = requests.get(link, timeout=15)
+        sr = requests.get(link, timeout=5)
         if sr.status_code != 200:
             return None
         ext = "srt"

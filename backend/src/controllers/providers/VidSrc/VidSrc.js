@@ -5,12 +5,12 @@ import base64 from 'base-64';
 import got from 'cloudflare-scraper';
 import { ErrorObject } from '../../../helpers/ErrorObject.js';
 
-const URI = 'https://vidsrc-embed.ru';
-const HOST_URL = 'https://cloudnestra.com';
+const URI = 'https://vidsrc.xyz';
+const HOST_URL = 'https://rcp-player.com';
 export const VIDSRC_HLS_ORIGIN = 'tmstr4.shadowlandschronicles.com';
 
-const IFRAME2_SRC_RE = /id="player_iframe" src="(?<url>[^"]+)"/;
-const IFRAME3_SRC_RE = /src: '(?<url>\/prorcp\/[^']+)'/;
+const IFRAME2_SRC_RE = /(?:id="player_iframe"|iframe) src="(?<url>[^"]+)"/;
+const IFRAME3_SRC_RE = /src: '(?<url>(?:\/prorcp\/)?[^']+)'/;
 const PARAMS_RE = /<div id="(?<id>[^"]+)" style="display:none;">(?<content>[^>]+)<\/div>/;
 const FILE_RE = /player_parent.*?file:.*?'(.*?)'.*?cuid/;
 const shouldDebug = process.argv.includes('--debug');

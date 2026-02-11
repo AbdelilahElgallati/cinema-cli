@@ -102,3 +102,22 @@ class SettingsManager:
     def default_subtitle_language(self, value):
         self.settings["default_subtitle_language"] = value
         self.save()
+
+    @property
+    def use_idm(self):
+        return self.settings.get("use_idm", False)
+
+    @use_idm.setter
+    def use_idm(self, value):
+        self.settings["use_idm"] = value
+        self.save()
+
+    @property
+    def idm_path(self):
+        # Default path for IDM on 64-bit Windows
+        return self.settings.get("idm_path", r"C:\Program Files (x86)\Internet Download Manager\IDMan.exe")
+
+    @idm_path.setter
+    def idm_path(self, value):
+        self.settings["idm_path"] = value
+        self.save()

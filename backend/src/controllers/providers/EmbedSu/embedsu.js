@@ -2,7 +2,7 @@ import fetch from 'node-fetch';
 import { languageMap } from '../../../utils/languages.js';
 import { ErrorObject } from '../../../helpers/ErrorObject.js';
 
-const DOMAIN = 'https://embed.su';
+const DOMAIN = 'https://embedsu.site';
 const headers = {
   'User-Agent':
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -116,7 +116,7 @@ export async function getEmbedsu(media) {
     return {
       files: [
         {
-          file: originalPlaylist.replace('embed.su/api/proxy/viper/', ''),
+          file: originalPlaylist.replace(/.*\/api\/proxy\/viper\//, ''),
           type: 'hls',
           lang: 'en',
         },
