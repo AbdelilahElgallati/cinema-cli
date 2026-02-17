@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import requests
 import urllib3
@@ -111,7 +112,7 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
                 seen_lang.add(x["lang"])
 
         try:
-            temp_dir = os.path.join(os.getcwd(), ".download_temp")
+            temp_dir = os.path.join(tempfile.gettempdir(), "cinema-cli-subs")
             os.makedirs(temp_dir, exist_ok=True)
             base = "".join(c for c in title if c.isalnum() or c in " _-").strip().replace(" ", "_")
             for s in ordered[:5]:
@@ -134,7 +135,7 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
     # Fallback: fetch from OpenSubtitles (multi-language)
     if not sub_paths:
         try:
-            temp_dir = os.path.join(os.getcwd(), ".download_temp")
+            temp_dir = os.path.join(tempfile.gettempdir(), "cinema-cli-subs")
             os.makedirs(temp_dir, exist_ok=True)
             yr = sn = epn = None
             if isinstance(meta, dict):

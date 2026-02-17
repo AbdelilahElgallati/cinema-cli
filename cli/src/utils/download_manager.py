@@ -166,7 +166,11 @@ class DownloadManager:
                 status_forcelist=[429, 500, 502, 503, 504],
                 method_whitelist=["HEAD", "GET"],
             )
-        adapter = HTTPAdapter(max_retries=retry)
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_connections=10,
+            pool_maxsize=20,
+        )
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
@@ -709,10 +713,11 @@ class DownloadManager:
             "--prefer-ffmpeg",
             "--ffmpeg-location", shutil.which("ffmpeg") or "ffmpeg",
             # Aggressive performance optimizations
-            "--buffer-size", "64K",
+            "--buffer-size", "1M",
             "--http-chunk-size", "50M",
-            # Post-processing for perfect sync
-            "--postprocessor-args", "ffmpeg:-async 1 -vsync cfr -copyts -start_at_zero",
+            # Post-processing: only fix negative timestamps; do NOT touch frame/sample timing.
+            # -vsync cfr / -async 1 duplicate/drop frames and resample audio, causing A/V desync.
+            "--postprocessor-args", "ffmpeg:-avoid_negative_ts make_non_negative -max_interleave_delta 0",
             # Skip unnecessary metadata processing
             "--no-write-description",
             "--no-write-info-json",
@@ -1187,8 +1192,9 @@ class DownloadManager:
 
     def _parallel_range_download(self, url, output_path, headers, total_size, task):
         """Download using multiple connections with proper error handling."""
-        num_threads = min(4, (total_size // (1024 * 1024)) + 1)  # Scale threads by size
-        if num_threads < 2:
+        # 1 thread per 5 MB, min 4, max 16; tiny files fall back to single-threaded
+        num_threads = min(16, max(4, total_size // (5 * 1024 * 1024)))
+        if num_threads < 2 or total_size < 2 * 1024 * 1024:
             return self._single_threaded_download(url, output_path, headers, task, total_size)
         
         chunk_size = total_size // num_threads
@@ -1225,7 +1231,7 @@ class DownloadManager:
                         
                         with open(output_path, "r+b") as f:
                             f.seek(start)
-                            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                            for chunk in resp.iter_content(chunk_size=512 * 1024):  # 512 KB → fewer Python callbacks
                                 if not self.running:
                                     return False
                                 if chunk:
@@ -1306,7 +1312,7 @@ class DownloadManager:
                     
                     mode = 'ab' if resume_from > 0 else 'wb'
                     with open(output_path, mode) as f:
-                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):  # 4 MB → fewer syscalls
                             if not self.running:
                                 return False
                             if chunk:
@@ -1529,13 +1535,17 @@ class DownloadManager:
             return "mov_text" if is_mp4 else "srt"
 
         # Build ultra-optimized ffmpeg command for fastest muxing
+        # IMPORTANT: this is a pure-copy remux (no frame/sample manipulation).
+        # Do NOT add -vsync cfr, -async, -copyts, or -start_at_zero here —
+        # they rewrite frame/sample timestamps and are the primary cause of
+        # A/V desynchronisation and perceptible "frame delays" during playback.
         cmd = [
-            "ffmpeg", 
-            "-hide_banner", 
+            "ffmpeg",
+            "-hide_banner",
             "-loglevel", "error",
-            "-threads", "0",  # Auto-detect optimal thread count
-            "-fflags", "+genpts+igndts",  # Fast processing flags
-            "-y", 
+            "-threads", "0",        # auto-detect optimal thread count
+            "-fflags", "+genpts",   # generate missing PTS; do NOT use +igndts (breaks B-frame order)
+            "-y",
             "-i", video_file
         ]
         for s in subs:
@@ -1547,28 +1557,23 @@ class DownloadManager:
             cmd.extend(["-map", f"{i}:s?"])
 
         cmd.extend(["-c:v", "copy", "-c:a", "copy", "-c:s", _codec_for_sub(video_file)])
-        
-        # Ensure A/V sync during subtitle embedding
+
+        # Pure-copy safe flags: interleaving + non-negative TS guard only
         cmd.extend([
-            "-async", "1",
-            "-vsync", "cfr",
-            "-copyts",
-            "-start_at_zero",
+            "-max_interleave_delta", "0",          # proper A/V/S interleaving without reordering
+            "-avoid_negative_ts", "make_non_negative",  # fix streams that start negative
         ])
 
-        # Aggressive optimization flags for speed
+        # Container-specific optimisation flags for speed
         if is_mp4:
             cmd.extend([
-                "-movflags", "+faststart",  # Removed empty_moov as it can cause issues with some players
-                "-avoid_negative_ts", "make_non_negative",
+                "-movflags", "+faststart",
             ])
-        else:
-            cmd.extend(["-avoid_negative_ts", "make_non_negative"])
-        
+
         # Skip unnecessary processing
         cmd.extend([
-            "-map_metadata", "0",  # Copy only main metadata
-            "-write_tmcd", "0",    # Skip timecode track
+            "-map_metadata", "0",   # copy only main metadata
+            "-write_tmcd", "0",     # skip timecode track
         ])
 
         # Metadata per subtitle stream

@@ -1177,13 +1177,19 @@ class CinemaCLI:
                             langs.append(code)
 
                 def _lang_label(code):
-                    names = {"ar": "Arabic (Default)", "en": "English", "fr": "French", "es": "Spanish", "und": "Unknown"}
+                    names = {
+                        "ar": "Arabic", "en": "English", "fr": "French",
+                        "es": "Spanish", "de": "German", "tr": "Turkish",
+                        "pt": "Portuguese", "it": "Italian", "und": "Unknown",
+                    }
                     return names.get(code, code)
 
-                lang_opts = [{"name": f"📝 {_lang_label('ar')}", "value": "ar"}]
+                lang_opts = [
+                    {"name": f"📝 Default ({_lang_label(preferred_sub_lang)})", "value": "auto"},
+                    {"name": "🗂 All Available (embed every track)", "value": "all"},
+                ]
                 for code in langs:
-                    if code != "ar":
-                        lang_opts.append({"name": f"📝 {_lang_label(code)}", "value": code})
+                    lang_opts.append({"name": f"📝 {_lang_label(code)}", "value": code})
                 lang_opts.append({"name": "🚫 No subtitles", "value": "none"})
 
                 lang_sel = selection_menu(
@@ -1192,12 +1198,16 @@ class CinemaCLI:
                     show_details=False,
                     formatter=lambda x: x["name"],
                 )
-                if lang_sel:
+                if lang_sel and lang_sel.get("action") == "select":
                     chosen = lang_sel["value"]["value"]
-                    if chosen == "none":
+                    if chosen == "all":
+                        include_all_subs = True
+                    elif chosen == "none":
                         preferred_sub_lang = "none"
-                    else:
+                        include_all_subs = False
+                    elif chosen != "auto":
                         preferred_sub_lang = chosen
+                        include_all_subs = False
         except Exception:
             pass
 
