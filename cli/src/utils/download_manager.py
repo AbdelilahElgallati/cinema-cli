@@ -19,6 +19,7 @@ from src.config import DOWNLOAD_LOG, SUCCESS, TEXT, WARNING, console
 from src.utils.app_logger import log_event
 from src.utils.storage import load_json_data, save_json_data
 from src.utils.utils import sanitize_filename
+from src.utils.subtitles import fetch_subtitles
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -95,7 +96,7 @@ class DownloadManager:
         except Exception:
             pass
 
-    def add_task(self, url, filename, title, subtitles=None, headers=None, meta=None, fallback_sources=None, api_params=None, preferred_sub_lang='ar', include_all_subs=True):
+    def add_task(self, url, filename, title, subtitles=None, headers=None, meta=None, fallback_sources=None, api_params=None, preferred_sub_lang='ar', include_all_subs=True, fallback_sub_langs=None):
         task = {
             "id": str(uuid.uuid4()),
             "url": url,
@@ -104,6 +105,7 @@ class DownloadManager:
             "subtitles": subtitles,
             "preferred_sub_lang": preferred_sub_lang,
             "include_all_subs": include_all_subs,
+            "fallback_sub_langs": fallback_sub_langs,
             "headers": headers,
             "meta": meta,
             "fallback_sources": fallback_sources or [],
@@ -379,12 +381,14 @@ class DownloadManager:
 
     def _download_subtitles(self, task, temp_dir):
         """Download subtitles in parallel for faster performance."""
-        if not task.get("subtitles"):
-            return
-
         # If already downloaded, skip
         if task.get("subtitle_files") or task.get("subtitle_file"):
             return
+
+        # Subtitle preferences
+        preferred = (task.get("preferred_sub_lang") or "ar").strip().lower()
+        include_all = bool(task.get("include_all_subs", True))
+        fallback_langs = task.get("fallback_sub_langs")
 
         def norm_lang(lang: str) -> str:
             l = (lang or "").strip().lower()
@@ -411,13 +415,12 @@ class DownloadManager:
             }
             return m.get(code, code)
 
-        # Get subtitle preferences
-        preferred = norm_lang(task.get("preferred_sub_lang") or "ar")
-        include_all = bool(task.get("include_all_subs", True))
+        # Normalize
+        preferred = norm_lang(preferred)
         if preferred == "none":
             return
 
-        # Build subtitle list
+        # Build subtitle list from API payload
         subs = task.get("subtitles") or []
         # normalize and filter items that have url
         items = []
@@ -428,7 +431,45 @@ class DownloadManager:
                     "url": s.get("url"),
                 })
 
+        # If API didn't provide subtitles, fall back to OpenSubtitles (multi-language)
         if not items:
+            try:
+                yr = sn = epn = None
+                meta = task.get("meta") or {}
+                if isinstance(meta, dict):
+                    yr = meta.get("year")
+                    sn = meta.get("season")
+                    epn = meta.get("episode")
+
+                langs = []
+                if isinstance(fallback_langs, (list, tuple)):
+                    langs = [str(x).strip().lower() for x in fallback_langs if str(x).strip()]
+                if not langs:
+                    langs = [preferred, "ar", "en"]
+
+                subs_found = fetch_subtitles(task.get("title") or "", langs, year=yr, season=sn, episode=epn)
+                if subs_found:
+                    base, _ = os.path.splitext(task.get("filename") or task.get("title") or "video")
+                    base = os.path.basename(base)
+                    downloaded = []
+                    for s in subs_found:
+                        lang = norm_lang(str(s.get("lang") or "und"))
+                        ext = str(s.get("ext") or "srt")
+                        sub_filename = os.path.join(temp_dir, f"{base}.{lang}.{ext}")
+                        with open(sub_filename, "wb") as f:
+                            f.write(s.get("content") or b"")
+                        downloaded.append({"lang": lang, "name": display_lang(lang), "path": sub_filename})
+                        if not include_all:
+                            break
+                    if downloaded:
+                        downloaded.sort(key=lambda x: (0 if x["lang"] == preferred else 1, x["lang"]))
+                        with self.lock:
+                            task["subtitle_files"] = downloaded
+                            task["subtitle_file"] = downloaded[0]["path"]
+                            self._save(force=True)
+                    return
+            except Exception as e:
+                self._log(f"OpenSubtitles fallback failed: {e}", level="WARNING")
             return
 
         preferred_items = [x for x in items if x["lang"] == preferred]
@@ -641,7 +682,7 @@ class DownloadManager:
 
         # Aggressive optimization for fragment concurrency
         # Workers get moderate concurrency, regular sources get maximum
-        fragments = "8" if is_worker else "64"
+        fragments = os.getenv("YTDLP_CONCURRENT_FRAGMENTS") or ("8" if is_worker else "64")
         
         output_path = os.path.abspath(output_path)
         output_dir = os.path.dirname(output_path)
@@ -681,10 +722,10 @@ class DownloadManager:
         # Add aria2c if available (much faster for HLS/fragmented streams)
         if shutil.which("aria2c"):
             # Aggressive connection settings for maximum speed
-            conn = "12" if is_worker else "64"
+            conn = os.getenv("ARIA2C_CONNECTIONS") or ("12" if is_worker else "64")
             cmd.extend([
                 "--downloader", "aria2c",
-                "--downloader-args", f"aria2c:-x {conn} -s {conn} -k 5M --file-allocation=none --async-dns=false --max-tries=10 --retry-wait=1 --timeout=30 --connect-timeout=10 --split=32"
+                "--downloader-args", f"aria2c:-x {conn} -s {conn} -k 5M --file-allocation=none --async-dns=false --max-tries=10 --retry-wait=1 --timeout=30 --connect-timeout=10 --split={conn}"
             ])
         
         # Add headers

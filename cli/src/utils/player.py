@@ -9,7 +9,7 @@ from rich.align import Align
 from rich.panel import Panel
 from src.config import SUCCESS, ACCENT, WARNING, console
 from src.ui.ui import clear
-from src.utils.subtitles import fetch_arabic_subtitle
+from src.utils.subtitles import fetch_arabic_subtitle, fetch_subtitles
 
 # Suppress SSL warnings for subtitle providers with expired certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -82,7 +82,7 @@ def _norm_lang(lang: str) -> str:
     return l or "und"
 
 
-def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs):
+def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=None):
     """Download / collect subtitle paths. Returns list of local file paths or URLs."""
     sub_paths = []
     preferred = _norm_lang(preferred_sub_lang or "ar")
@@ -131,7 +131,7 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
         except Exception:
             pass
 
-    # Fallback: fetch Arabic from OpenSubtitles
+    # Fallback: fetch from OpenSubtitles (multi-language)
     if not sub_paths:
         try:
             temp_dir = os.path.join(os.getcwd(), ".download_temp")
@@ -141,14 +141,36 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
                 yr = meta.get("year")
                 sn = meta.get("season")
                 epn = meta.get("episode")
-            res = fetch_arabic_subtitle(title, year=yr, season=sn, episode=epn)
-            if res:
-                content, sub_ext = res
+
+            # Build language priority list
+            langs = []
+            if fallback_langs and isinstance(fallback_langs, (list, tuple)):
+                langs = [str(x).strip().lower() for x in fallback_langs if str(x).strip()]
+            if not langs:
+                langs = [_norm_lang(preferred_sub_lang or "ar"), "ar", "en"]
+
+            subs_found = fetch_subtitles(title, langs, year=yr, season=sn, episode=epn, max_per_language=1)
+            if not subs_found:
+                # keep old behavior as final fallback
+                res = fetch_arabic_subtitle(title, year=yr, season=sn, episode=epn)
+                if res:
+                    content, sub_ext = res
+                    subs_found = [{"lang": "ar", "content": content, "ext": sub_ext}]
+
+            if subs_found:
                 base = "".join(c for c in title if c.isalnum() or c in " _-").strip().replace(" ", "_")
-                sub_path = os.path.join(temp_dir, f"{base}.ar.{sub_ext}")
-                with open(sub_path, "wb") as f:
-                    f.write(content)
-                sub_paths.append(sub_path)
+                # Save multiple subtitles (preferred first if include_all_subs)
+                saved = []
+                for s in subs_found:
+                    lang = _norm_lang(str(s.get("lang") or "und"))
+                    sub_ext = str(s.get("ext") or "srt")
+                    sub_path = os.path.join(temp_dir, f"{base}.{lang}.{sub_ext}")
+                    with open(sub_path, "wb") as f:
+                        f.write(s.get("content") or b"")
+                    saved.append(sub_path)
+                    if not include_all_subs:
+                        break
+                sub_paths.extend(saved)
         except Exception:
             pass
 
@@ -313,7 +335,7 @@ def _run_vlc(args):
 # ─── Main play functions ─────────────────────────────────────────────
 
 def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=0,
-                preferred_sub_lang='ar', include_all_subs=True, player='mpv'):
+                preferred_sub_lang='ar', include_all_subs=True, player='mpv', fallback_langs=None):
     """
     Plays a stream using the chosen player (mpv, vlc, or iina).
     Attempts yt-dlp via mpv first, then falls back to direct mpv, then VLC.
@@ -352,7 +374,7 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
     )
 
     # Prepare subtitles
-    sub_paths = _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs)
+    sub_paths = _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=fallback_langs)
 
     # ── VLC path ──
     if player_name == "vlc":

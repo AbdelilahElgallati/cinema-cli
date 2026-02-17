@@ -766,8 +766,15 @@ class CinemaCLI:
             f"[bold {TEXT}]7. Preferred Player:[/bold {TEXT}] {pref_player.upper()} (available: {avail_str})"
         )
 
+        fb_langs = self.settings.get('fallback_subtitle_langs', ['ar', 'en'])
+        if not isinstance(fb_langs, list):
+            fb_langs = ['ar', 'en']
+        console.print(
+            f"[bold {TEXT}]8. OpenSubtitles Fallback Languages:[/bold {TEXT}] {', '.join(fb_langs)}"
+        )
+
         choice = console.input(
-            f"\n[bold {ACCENT}]Select setting to change (1-7) or Enter to back: [/bold {ACCENT}]"
+            f"\n[bold {ACCENT}]Select setting to change (1-8) or Enter to back: [/bold {ACCENT}]"
         )
 
         if choice == "1":
@@ -841,6 +848,18 @@ class CinemaCLI:
                 console.print(
                     f"[green]Preferred player set to: {chosen.upper()}[/green]"
                 )
+        elif choice == "8":
+            console.print("[dim]Example: ar,en,fr (used only when a stream/source has missing/limited subtitles)[/dim]")
+            new_val = console.input(
+                f"[bold {ACCENT}]Enter fallback subtitle languages (comma-separated): [/bold {ACCENT}]"
+            )
+            langs = [x.strip().lower() for x in (new_val or '').split(',') if x.strip()]
+            # de-dupe while preserving order
+            seen = set()
+            langs = [x for x in langs if not (x in seen or seen.add(x))]
+            if langs:
+                self.settings['fallback_subtitle_langs'] = langs
+                console.print(f"[green]Fallback languages set to: {', '.join(langs)}[/green]")
         else:
             return
 
@@ -1250,7 +1269,8 @@ class CinemaCLI:
                     "episode": ep.get("episode_number")
                 },
                 preferred_sub_lang=preferred_sub_lang,
-                include_all_subs=include_all_subs
+                include_all_subs=include_all_subs,
+                fallback_sub_langs=self.settings.get('fallback_subtitle_langs', ['ar','en']),
             )
 
         console.print(f"\n[bold {SUCCESS}]Batch download queued![/bold {SUCCESS}]")
@@ -1527,6 +1547,7 @@ class CinemaCLI:
                     preferred_sub_lang=preferred_sub_lang,
                     include_all_subs=include_all_subs,
                     player=self.settings.get("preferred_player", "mpv"),
+                    fallback_langs=self.settings.get('fallback_subtitle_langs', ['ar','en']),
                 )
                 if isinstance(stats, dict) and playback_key:
                     self.playback[playback_key] = stats
@@ -1573,6 +1594,7 @@ class CinemaCLI:
                     api_params=api_params,
                     preferred_sub_lang=preferred_sub_lang,
                     include_all_subs=include_all_subs,
+                    fallback_sub_langs=self.settings.get('fallback_subtitle_langs', ['ar','en']),
                 )
                 return False
 

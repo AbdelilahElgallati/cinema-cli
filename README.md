@@ -6,7 +6,8 @@ A powerful, feature-rich movie and TV CLI application integrated with the CinePr
 
 ### 🎥 **Smart Streaming**
 - **Seamless Playback**: Stream content directly in high quality using `mpv`.
-- **Auto-Arabic Subtitles**: Automatically prioritizes and loads Arabic subtitles if available.
+- **Multi-Subtitle Support**: Loads multiple subtitle tracks when available (switch in mpv/VLC).
+- **Smart Subtitle Fallback**: If the source provides missing/limited subtitles, the CLI can fetch fallback subtitles from OpenSubtitles (multi-language).
 - **Interactive Menu**: "Finished Watching" menu lets you easily jump to the next episode, replay, or browse details.
 
 ### 🚀 **Turbo Downloads**
@@ -47,6 +48,13 @@ This repository contains two main parts:
 - `mpv` (for playback)
 - `ffmpeg` (for certain download tasks)
 - Optional: `yt-dlp` for improved stream handling, `aria2c` for faster downloads
+
+### Speed tuning (optional)
+
+You can push more parallelism via environment variables:
+
+- `YTDLP_CONCURRENT_FRAGMENTS` (default: 64; worker sources may use lower defaults)
+- `ARIA2C_CONNECTIONS` (default: 64; worker sources may use lower defaults)
 
 ## Quick start (development)
 
