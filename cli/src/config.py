@@ -33,4 +33,10 @@ FAVORITES_FILE = os.path.expanduser("~/.cinema-cli-favorites.json")
 PLAYBACK_FILE = os.path.expanduser("~/.cinema-cli-playback.json")
 SETTINGS_FILE = os.path.expanduser("~/.cinema-cli-settings.json")
 
+# Centralized data directory
+DATA_DIR = os.path.expanduser("~/.cinema-cli")
+os.makedirs(DATA_DIR, exist_ok=True)
+DOWNLOAD_LOG = os.path.join(DATA_DIR, "download.log")
+APP_LOG = os.path.join(DATA_DIR, "app.log")
+
 console = Console()

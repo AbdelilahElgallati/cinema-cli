@@ -61,10 +61,10 @@ export async function getVidSrcCC(media) {
   let firstUrl;
 
   if (media.type !== 'tv') {
-    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=movie&v=${v}&vrf=${vrfToken}&imdbId=${media.imdb}`;
+    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=movie&v=${v}&vrf=${vrfToken}&imdbId=${media.imdbId}`;
     origin = `${DOMAIN.replace('api/', '')}embed/movie/${media.tmdb}`;
   } else {
-    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=tv&v=${v}&vrf=${vrfToken}&season=${media.season}&episode=${media.episode}&imdbId=${media.imdb}`;
+    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=tv&v=${v}&vrf=${vrfToken}&season=${media.season}&episode=${media.episode}&imdbId=${media.imdbId}`;
     origin = `${DOMAIN.replace('api/', '')}embed/tv/${media.tmdb}/${media.season}/${media.episode}`;
   }
 
@@ -90,11 +90,9 @@ export async function getVidSrcCC(media) {
   let firstData = await firstResponse.json();
 
   let hashes = [];
-  if (firstData && firstData.data && Array.isArray(firstData.data)) {
-    firstData.data.forEach((server) => {
-      hashes.push(server.hash);
-    });
-  }
+  firstData.data.forEach((server) => {
+    hashes.push(server.hash);
+  });
 
   let vidsrcCCSources = [];
 
