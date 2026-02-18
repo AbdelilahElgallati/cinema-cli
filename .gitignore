@@ -37,6 +37,10 @@ pnpm-debug.log*
 # Coverage
 coverage/
 
+# Generated launcher scripts (created by setup.bat / setup.sh with local paths)
+cinema
+cinema.bat
+
 # Temporary files
 tmp/
 temp/

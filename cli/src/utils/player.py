@@ -80,13 +80,43 @@ def _norm_lang(lang: str) -> str:
         return "fr"
     if l in ["spanish", "spa", "es"]:
         return "es"
+    if l in ["german", "deu", "ger", "de"]:
+        return "de"
+    if l in ["turkish", "tur", "tr"]:
+        return "tr"
+    if l in ["portuguese", "por", "pt"]:
+        return "pt"
+    if l in ["italian", "ita", "it"]:
+        return "it"
+    if l in ["chinese", "zho", "chi", "zh"]:
+        return "zh"
+    if l in ["japanese", "jpn", "ja"]:
+        return "ja"
+    if l in ["korean", "kor", "ko"]:
+        return "ko"
+    if l in ["hindi", "hin", "hi"]:
+        return "hi"
     return l or "und"
 
 
-def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=None):
-    """Download / collect subtitle paths. Returns list of local file paths or URLs."""
+def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
+                       include_all_subs, fallback_langs=None, preferred_langs=None):
+    """Download / collect subtitle paths. Returns list of local file paths or URLs.
+
+    preferred_langs: ordered list of language codes (primary first).
+        When provided, tracks in this order are fetched and passed to the player.
+        include_all_subs=True means all langs in the list; False means just the first.
+    """
     sub_paths = []
-    preferred = _norm_lang(preferred_sub_lang or "ar")
+
+    # Build effective ordered language list
+    primary = _norm_lang(preferred_sub_lang or "ar")
+    if preferred_langs and isinstance(preferred_langs, (list, tuple)) and preferred_langs:
+        wanted = [_norm_lang(l) for l in preferred_langs if l]
+        if wanted[0] != primary:
+            wanted = [primary] + [l for l in wanted if l != primary]
+    else:
+        wanted = [primary]
 
     if subtitles:
         items = []
@@ -94,22 +124,30 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
             if isinstance(s, dict) and s.get("url"):
                 items.append({"lang": _norm_lang(s.get("lang") or s.get("language")), "url": s.get("url")})
 
-        preferred_items = [x for x in items if x["lang"] == preferred]
-        if not preferred_items and preferred != "ar":
-            preferred_items = [x for x in items if x["lang"] == "ar"]
+        # Build ordered list: wanted languages first (in priority order), then others if include_all
         ordered = []
-        if preferred_items:
-            ordered.append(preferred_items[0])
+        seen_url = set()
+        seen_lang = set()
+
+        for lang in (wanted if include_all_subs else wanted[:1]):
+            for x in items:
+                if x["lang"] == lang and x["url"] not in seen_url and x["lang"] not in seen_lang:
+                    ordered.append(x)
+                    seen_url.add(x["url"])
+                    seen_lang.add(x["lang"])
+                    break  # one per language
 
         if include_all_subs:
-            seen = {x["url"] for x in ordered}
-            seen_lang = {x["lang"] for x in ordered}
+            # Append remaining languages not explicitly in wanted list
             for x in items:
-                if x["url"] in seen or x["lang"] in seen_lang:
-                    continue
-                ordered.append(x)
-                seen.add(x["url"])
-                seen_lang.add(x["lang"])
+                if x["url"] not in seen_url and x["lang"] not in seen_lang:
+                    ordered.append(x)
+                    seen_url.add(x["url"])
+                    seen_lang.add(x["lang"])
+
+        # Fallback: nothing matched wanted langs — use first available
+        if not ordered and items:
+            ordered.append(items[0])
 
         try:
             temp_dir = os.path.join(tempfile.gettempdir(), "cinema-cli-subs")
@@ -143,12 +181,16 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
                 sn = meta.get("season")
                 epn = meta.get("episode")
 
-            # Build language priority list
-            langs = []
+            # Build language request list: wanted langs first, then fallback_langs, then ar+en
+            langs = list(wanted) if include_all_subs else [primary]
             if fallback_langs and isinstance(fallback_langs, (list, tuple)):
-                langs = [str(x).strip().lower() for x in fallback_langs if str(x).strip()]
-            if not langs:
-                langs = [_norm_lang(preferred_sub_lang or "ar"), "ar", "en"]
+                for x in fallback_langs:
+                    c = str(x).strip().lower()
+                    if c and c not in langs:
+                        langs.append(c)
+            for last in ("ar", "en"):
+                if last not in langs:
+                    langs.append(last)
 
             subs_found = fetch_subtitles(title, langs, year=yr, season=sn, episode=epn, max_per_language=1)
             if not subs_found:
@@ -160,7 +202,14 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
 
             if subs_found:
                 base = "".join(c for c in title if c.isalnum() or c in " _-").strip().replace(" ", "_")
-                # Save multiple subtitles (preferred first if include_all_subs)
+                # Sort by wanted-list priority
+                def _sort_key(s):
+                    lang = _norm_lang(str(s.get("lang") or "und"))
+                    try:
+                        return langs.index(lang)
+                    except ValueError:
+                        return len(langs)
+                subs_found = sorted(subs_found, key=_sort_key)
                 saved = []
                 for s in subs_found:
                     lang = _norm_lang(str(s.get("lang") or "und"))
@@ -180,7 +229,25 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
 
 # ─── MPV argument builders ───────────────────────────────────────────
 
-def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False):
+def _quality_to_ytdl_format(quality):
+    """Convert a quality label ('1080p', '720p', '480p', '360p', '4k') to a
+    yt-dlp / mpv --ytdl-format selector string.  Returns None for 'best'/'auto'."""
+    if not quality or quality in ("auto", "best"):
+        return None
+    q = quality.lower().replace("p", "").strip()
+    height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360}
+    height = height_map.get(q)
+    if height is None:
+        # Fallback: try parsing raw number
+        try:
+            height = int(q)
+        except ValueError:
+            return None
+    # Prefer video stream with height <= desired; accept any audio; fall back to best
+    return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+
+
+def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None):
     """Build mpv command-line arguments."""
     args = [
         "mpv",
@@ -199,9 +266,12 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
         "--audio-stream-silence=yes",
         "--audio-pitch-correction=yes",
         # Subtitle synchronization and auto-correction
+        # sub-fix-timing: smooths tiny gaps between consecutive events (display only)
         "--sub-fix-timing=yes",
         "--sub-use-margins=yes",
-        "--sub-ass-override=force",
+        # strip: apply mpv's default styling for external SRT/VTT but don't
+        # override ASS timing overrides — prevents desync when switching tracks
+        "--sub-ass-override=strip",
         "--sub-auto=fuzzy",
         f"--slang={preferred_sub_lang},ar,ara,arabic,en,eng,fr,fra,es,spa",
         # Cache and buffering for stability
@@ -219,6 +289,12 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
 
     if use_ytdl and shutil.which("yt-dlp"):
         args.insert(1, "--ytdl")
+        # Quality selection via yt-dlp: request a specific resolution when the user
+        # chose something other than "best".  mpv passes this to yt-dlp as a format
+        # selector so the HLS manifest variant is chosen before playback starts.
+        fmt = _quality_to_ytdl_format(quality)
+        if fmt:
+            args.append(f"--ytdl-format={fmt}")
         if headers:
             header_list = []
             for k, v in headers.items():
@@ -240,11 +316,10 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
 
     for sp in sub_paths:
         args.append(f"--sub-file={sp}")
-    if sub_paths:
-        args.extend([
-            "--sub-delay=0",
-            "--audio-delay=0",
-        ])
+    # Do NOT force sub-delay=0 or audio-delay=0 here.
+    # Pinning both to 0 prevents mpv from doing per-track compensation,
+    # causing desync whenever the user switches subtitle tracks.
+    # mpv's automatic sync is reliable; expose z/x to the user for manual tuning.
 
     return args
 
@@ -336,10 +411,13 @@ def _run_vlc(args):
 # ─── Main play functions ─────────────────────────────────────────────
 
 def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=0,
-                preferred_sub_lang='ar', include_all_subs=True, player='mpv', fallback_langs=None):
+                preferred_sub_lang='ar', include_all_subs=True, preferred_langs=None,
+                player='mpv', fallback_langs=None, quality=None):
     """
     Plays a stream using the chosen player (mpv, vlc, or iina).
-    Attempts yt-dlp via mpv first, then falls back to direct mpv, then VLC.
+    preferred_langs: ordered list of language codes (primary first) from settings.
+    quality: desired resolution, e.g. '1080p', '720p', '480p', '360p', '4k'.
+             Passed to yt-dlp via --ytdl-format when mpv falls back to yt-dlp mode.
     Returns a dict with playback stats: {position, duration, finished}
     """
     player_name, player_exe = _resolve_player(player)
@@ -375,7 +453,12 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
     )
 
     # Prepare subtitles
-    sub_paths = _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=fallback_langs)
+    sub_paths = _prepare_subtitles(
+        title, subtitles, headers, meta,
+        preferred_sub_lang, include_all_subs,
+        fallback_langs=fallback_langs,
+        preferred_langs=preferred_langs,
+    )
 
     # ── VLC path ──
     if player_name == "vlc":
@@ -389,15 +472,18 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
 
     # ── MPV path (with retry logic to fix instant-close) ──
     try:
-        # Attempt 1: direct mpv without yt-dlp (most reliable for direct stream URLs)
+        # Attempt 1: direct mpv without yt-dlp (most reliable for direct stream URLs).
+        # Quality selection via --ytdl-format only applies when yt-dlp is active,
+        # so pass quality=None for the direct attempt; it is applied in the retry.
         mpv_args = _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False)
         console.print(f"[dim]Launching mpv (direct mode)...[/dim]")
         stats = _run_mpv(mpv_args)
 
-        # If mpv closed instantly (played < 3 sec, no duration detected), try with yt-dlp
+        # If mpv closed instantly (played < 3 sec, no duration detected), try with yt-dlp.
+        # Pass the user's quality preference so the correct HLS variant is selected.
         if stats["duration"] == 0 and stats["position"] == 0 and shutil.which("yt-dlp"):
             console.print(f"[{WARNING}]Direct playback failed, retrying with yt-dlp...[/{WARNING}]")
-            mpv_args = _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=True)
+            mpv_args = _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=True, quality=quality)
             stats = _run_mpv(mpv_args)
 
         # If still nothing and VLC is available, offer VLC fallback

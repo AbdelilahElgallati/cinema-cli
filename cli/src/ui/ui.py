@@ -1,8 +1,10 @@
 import atexit
 import html
 import os
+import re
 import subprocess
 import sys
+import textwrap
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,9 +20,11 @@ from rich import box
 from rich.align import Align
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.rule import Rule
 from rich.text import Text
 from src.config import (
     ACCENT,
+    APP_VERSION,
     BACKEND_URL,
     BG,
     PRIMARY,
@@ -32,35 +36,71 @@ from src.config import (
 )
 
 
+
+# ─── ASCII art ─────────────────────────────────────────────────────────────────
+
+_CINEMA_ART = (
+    "  ██████╗██╗███╗   ██╗███████╗███╗   ███╗  █████╗      ██████╗██╗     ██╗ \n"
+    " ██╔════╝██║████╗  ██║██╔════╝████╗ ████║ ██╔══██╗    ██╔════╝██║     ██║ \n"
+    " ██║     ██║██╔██╗ ██║█████╗  ██╔████╔██║ ███████║    ██║     ██║     ██║ \n"
+    " ██║     ██║██║╚██╗██║██╔══╝  ██║╚██╔╝██║ ██╔══██║    ██║     ██║     ██║ \n"
+    " ╚██████╗██║██║ ╚████║███████╗██║ ╚═╝ ██║ ██║  ██║    ╚██████╗███████╗██║ \n"
+    "  ╚═════╝╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚═╝ ╚═╝  ╚═╝     ╚═════╝╚══════╝╚═╝ "
+)
+
+_GOODBYE_ART = (
+    "  ___            _  _             _  \n"
+    " / __| ___  ___ | || |__ _  _  __| | \n"
+    " \\__ \\/ -_)/ -_)| || / _` || |/ _` | \n"
+    " |___/\\___|\\___|_||_\\__,_||_|\\__,_| "
+)
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _strip_rich(text: str) -> str:
+    """Remove rich markup tags to get a plain display string."""
+    return re.sub(r"\[/?[^\[\]]*\]", "", text)
+
+
+def _get_highlight_fg() -> str:
+    """Return the per-theme highlight foreground colour."""
+    try:
+        from src.config import THEMES, _active_theme_name
+        return THEMES[_active_theme_name].get("highlight_fg", "#FFFFFF")
+    except Exception:
+        return "#FFFFFF"
+
+
+# ─── Terminal clear ────────────────────────────────────────────────────────────
+
 def clear():
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def print_header(subtitle=""):
-    clear()
-    title = Text("🎬 CINEMA CLI", style=f"bold {PRIMARY}")
-    if subtitle:
-        title.append(f" | {subtitle}", style=f"italic {ACCENT}")
-
-    console.print(Panel(Align.center(title), border_style=PRIMARY, box=box.DOUBLE))
-    console.print()
-
+# ─── Splash screen ─────────────────────────────────────────────────────────────
 
 def show_splash():
     clear()
-    art = f"""
-[bold {PRIMARY}]
- ██████╗██╗███╗   ██╗███████╗███████╗███╗   ███╗ █████╗      ██████╗██╗     ██╗
-██╔════╝██║████╗  ██║██╔════╝██╔════╝████╗ ████║██╔══██╗    ██╔════╝██║     ██║
-██║     ██║██╔██╗ ██║█████╗  ███████╗██╔████╔██║███████║    ██║     ██║     ██║
-██║     ██║██║╚██╗██║██╔══╝  ██╔════╝██║╚██╔╝██║██╔══██║    ██║     ██║     ██║
-╚██████╗██║██║ ╚████║███████╗███████╗██║ ╚═╝ ██║██║  ██║    ╚██████╗███████╗██║
- ╚═════╝╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝     ╚═╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚═╝
-[/bold {PRIMARY}]
-[italic {ACCENT}]      Elevate Your Movie Experience - v2.0.0[/italic {ACCENT}]
-[dim]   Enhanced CLI with smart search, batch downloads, and more[/dim]
-    """
-    console.print(Align.center(art))
+
+    art_text = Text(justify="center")
+    art_text.append(_CINEMA_ART, style=f"bold {PRIMARY}")
+
+    tagline = Text(justify="center")
+    tagline.append("  Your Cinema. Your Way.  ", style=f"bold {ACCENT}")
+    tagline.append(f" v{APP_VERSION} ", style=f"dim {TEXT}")
+
+    console.print()
+    console.print(Align.center(art_text))
+    console.print(Align.center(tagline))
+    console.print()
+    console.print(
+        Rule(
+            f"[dim {TEXT}]  Streaming · Downloads · Subtitles · Smart Search  [/dim {TEXT}]",
+            style=PRIMARY,
+        )
+    )
+    console.print()
 
     # Ensure local backend is running (for localhost BACKEND_URL)
     def _is_backend_running(url: str) -> bool:
@@ -104,7 +144,6 @@ def show_splash():
             except Exception:
                 return None
 
-        # wait briefly for server to come up
         for _ in range(10):
             if _is_backend_running(url):
                 return proc
@@ -112,7 +151,6 @@ def show_splash():
 
         return proc
 
-    # Attempt auto-start; keep process reference to cleanup later
     _backend_proc = _maybe_start_backend(BACKEND_URL)
     if _backend_proc:
         atexit.register(
@@ -123,34 +161,99 @@ def show_splash():
             )
         )
 
+    _steps = [
+        "Initialising engine...",
+        "Loading library data...",
+        "Connecting to backend...",
+        "Ready!",
+    ]
     with Progress(
-        SpinnerColumn(spinner_name="dots", style=ACCENT),
-        TextColumn("[progress.description]{task.description}"),
+        SpinnerColumn(spinner_name="dots2", style=f"bold {PRIMARY}"),
+        TextColumn(f"[{ACCENT}]{{task.description}}[/{ACCENT}]"),
         console=console,
         transient=True,
     ) as progress:
-        progress.add_task(description="Initializing engine...", total=None)
-        time.sleep(1.5)
-        progress.add_task(description="Loading favorites...", total=None)
-        time.sleep(0.5)
-        progress.add_task(description="Ready!", total=None)
-        time.sleep(0.5)
+        task = progress.add_task(_steps[0], total=None)
+        time.sleep(0.7)
+        for step in _steps[1:]:
+            progress.update(task, description=step)
+            time.sleep(0.4)
+
+
+def show_goodbye():
+    """Display farewell art and pause briefly before exit."""
+    clear()
+    art_text = Text(justify="center")
+    art_text.append(_GOODBYE_ART, style=f"bold {ACCENT}")
+    console.print()
+    console.print(Align.center(art_text))
+    console.print()
+    console.print(
+        Align.center(
+            Text(f"Thanks for using Cinema CLI v{APP_VERSION}  ♥", style=f"dim {TEXT}")
+        )
+    )
+    console.print()
+    time.sleep(1.2)
+
+
+# ─── Header ────────────────────────────────────────────────────────────────────
+
+def print_header(subtitle=""):
+    clear()
+    header = Text()
+    header.append("🎬  CINEMA CLI", style=f"bold {PRIMARY}")
+    if subtitle:
+        header.append("  │  ", style=f"dim {PRIMARY}")
+        header.append(subtitle, style=f"bold {ACCENT}")
+    header.append("  │  ", style=f"dim {PRIMARY}")
+    header.append(f"v{APP_VERSION}", style=f"dim {TEXT}")
+
+    console.print(
+        Panel(
+            Align.center(header),
+            border_style=PRIMARY,
+            box=box.HEAVY,
+            padding=(0, 2),
+        )
+    )
+    console.print()
+
+
+# ─── Item formatter ────────────────────────────────────────────────────────────
 
 
 def format_item(item):
     title = item.get("title") or item.get("name", "Unknown")
-    date = item.get("release_date") or item.get("first_air_date", "????-??-??")
-    year = date[:4]
+    date  = item.get("release_date") or item.get("first_air_date", "????-??-??")
+    year  = date[:4] if isinstance(date, str) and len(date) >= 4 else "????"
     media_type = (
         "Movie" if "title" in item or item.get("media_type") == "movie" else "TV"
     )
     rating = item.get("vote_average", 0)
     return (
-        f"[bold {TEXT}]{title}[/bold {TEXT}] ({year}) | ⭐ {rating:.1f} | {media_type}"
+        f"[bold {TEXT}]{title}[/bold {TEXT}] "
+        f"[{WARNING}]({year})[/{WARNING}] "
+        f"[dim]⭐ {rating:.1f}[/dim] "
+        f"[dim {SECONDARY}]·[/dim {SECONDARY}] "
+        f"[dim {ACCENT}]{media_type}[/dim {ACCENT}]"
     )
 
 
+# ─── Help bar strings ──────────────────────────────────────────────────────────
+
+_HELP_BROWSE = "  ↑↓ Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
+_HELP_SELECT = "  ↑↓ Navigate   Enter Confirm   B/Q Cancel  "
+_HELP_MULTI  = "  ↑↓ Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
+
+
+# ─── Selection menu ────────────────────────────────────────────────────────────
+
 def selection_menu(items, title, show_details=True, formatter=None, default_index=0):
+    """Interactive arrow-key selection menu.
+
+    Returns {"action": "select"|"back"|"quit"|"favorite"|"batch", "value": item}.
+    """
     if not items:
         return None
 
@@ -164,117 +267,127 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
     kb = KeyBindings()
 
     @kb.add("up")
-    def _(event):
+    def _up(event):
         nonlocal selected_index
         selected_index = (selected_index - 1) % len(items)
 
     @kb.add("down")
-    def _(event):
+    def _down(event):
         nonlocal selected_index
         selected_index = (selected_index + 1) % len(items)
 
     @kb.add("enter")
-    def _(event):
+    def _enter(event):
         result["action"] = "select"
-        result["value"] = items[selected_index]
+        result["value"]  = items[selected_index]
         event.app.exit()
 
     @kb.add("b")
-    def _(event):
+    def _back(event):
         result["action"] = "back"
         event.app.exit()
 
     @kb.add("q")
-    def _(event):
+    def _quit(event):
         result["action"] = "quit"
         event.app.exit()
 
     @kb.add("f")
-    def _(event):
+    def _fav(event):
         result["action"] = "favorite"
-        result["value"] = items[selected_index]
+        result["value"]  = items[selected_index]
+        event.app.exit()
+
+    @kb.add("w")
+    def _watch_later(event):
+        result["action"] = "watch_later"
+        result["value"]  = items[selected_index]
         event.app.exit()
 
     @kb.add("d")
-    def _(event):
+    def _batch(event):
         result["action"] = "batch"
         event.app.exit()
 
+    @kb.add("g")
+    def _top(event):
+        nonlocal selected_index
+        selected_index = 0
+
+    @kb.add("G")
+    def _bottom(event):
+        nonlocal selected_index
+        selected_index = len(items) - 1
+
     def get_formatted_text():
         res = []
-        res.append(("class:title", f" {title} \n"))
-        res.append(("class:border", "─" * 60 + "\n"))
+        res.append(("class:header", f"  ══  {title}  ══\n"))
+        res.append(("class:border", "─" * 66 + "\n"))
 
-        for i in range(len(items)):
+        visible_start = max(0, selected_index - 12)
+        visible_end   = min(len(items), visible_start + 25)
+
+        if visible_start > 0:
+            res.append(("class:dim", f"  ↑ {visible_start} more above\n"))
+
+        for i in range(visible_start, visible_end):
             item = items[i]
-            display = formatter(item) if formatter else format_item(item)
-            # Strip rich tags for prompt_toolkit display or use HTML
-            clean_display = display.replace(f"[bold {TEXT}]", "").replace(
-                f"[/bold {TEXT}]", ""
-            )
+            raw  = formatter(item) if formatter else format_item(item)
+            disp = _strip_rich(raw)
 
             if i == selected_index:
-                res.append(("class:selected", f" ▶ {clean_display} \n"))
+                res.append(("class:selected", f"  ▶  {disp}\n"))
             else:
-                res.append(("class:item", f"   {clean_display} \n"))
+                res.append(("class:item", f"     {disp}\n"))
 
-        res.append(("class:border", "─" * 60 + "\n"))
-        res.append(
-            (
-                "class:help",
-                " [↑/↓] Navigate  [Enter] Select  [D] Batch Download  [F] Favorite  [B] Back  [Q] Quit ",
-            )
-        )
+        remaining = len(items) - visible_end
+        if remaining > 0:
+            res.append(("class:dim", f"  ↓ {remaining} more below\n"))
+
+        res.append(("class:border", "\n" + "─" * 66 + "\n"))
+        res.append(("class:help", _HELP_BROWSE))
         return res
 
     def get_details_text():
         if not show_details or not items:
             return ""
 
-        item = items[selected_index]
+        item     = items[selected_index]
         overview = item.get("overview", "No description available.")
+        overview = "\n".join(textwrap.wrap(overview, width=46))
 
-        # Wrap overview text at 50 characters for better readability
-        def wrap_text(text, width=50):
-            import textwrap
-
-            return "\n".join(textwrap.wrap(text, width=width))
-
-        overview = wrap_text(overview)
-
-        rating = item.get("vote_average", 0)
-        votes = item.get("vote_count", 0)
+        rating     = item.get("vote_average", 0)
+        votes      = item.get("vote_count", 0)
         popularity = item.get("popularity", 0)
 
-        title_text = html.escape(str(item.get("title") or item.get("name")))
+        title_text    = html.escape(str(item.get("title") or item.get("name", "")))
         overview_text = html.escape(overview)
 
-        details = f"\n<title> {title_text} </title>\n"
+        details  = f"\n<header> {title_text} </header>\n"
         details += f"<border>{'━' * 50}</border>\n"
-        details += f"<rating>⭐ Rating: {rating:.1f}/10 ({votes} votes)</rating>\n"
-        details += f"<pop>🔥 Popularity: {popularity:.0f}</pop>\n\n"
+        details += f"<rating>⭐  {rating:.1f}/10  ({votes:,} votes)</rating>\n"
+        details += f"<pop>🔥  Popularity: {popularity:.0f}</pop>\n\n"
         details += f"<overview>{overview_text}</overview>\n"
-
         return HTML(details)
 
+    hl_fg = _get_highlight_fg()
     style = Style.from_dict(
         {
-            "title": f"bold {PRIMARY}",
-            "border": f"{PRIMARY}",
-            "selected": f"bg:{PRIMARY} fg:#ffffff bold",
-            "item": f"{TEXT}",
-            "help": f"italic {ACCENT}",
-            "title": f"bold {ACCENT}",
-            "rating": f"{WARNING}",
-            "pop": f"{SUCCESS}",
+            "header":   f"bold {PRIMARY}",
+            "border":   f"dim {PRIMARY}",
+            "selected": f"bg:{PRIMARY} fg:{hl_fg} bold",
+            "item":     f"{TEXT}",
+            "help":     f"italic dim {TEXT}",
+            "dim":      f"dim {TEXT}",
+            "rating":   f"{WARNING}",
+            "pop":      f"{SUCCESS}",
             "overview": f"{TEXT}",
         }
     )
 
-    # Layout with details on the right
     body = VSplit(
         [
-            Window(content=FormattedTextControl(get_formatted_text), width=60),
+            Window(content=FormattedTextControl(get_formatted_text), width=68),
             Window(content=FormattedTextControl(get_details_text)),
         ],
         padding=2,
@@ -287,35 +400,41 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
     return result
 
 
+# ─── Multi-selection menu ───────────────────────────────────────────────────────
+
 def multi_selection_menu(items, title, formatter=None):
+    """Arrow-key multi-select with Space to toggle.
+
+    Returns list of selected items, or [] when cancelled.
+    """
     if not items:
         return []
 
     clear()
-    selected_index = 0
-    checked_indices = set()
+    selected_index  = 0
+    checked_indices: set = set()
 
     kb = KeyBindings()
 
     @kb.add("up")
-    def _(event):
+    def _up(event):
         nonlocal selected_index
         selected_index = (selected_index - 1) % len(items)
 
     @kb.add("down")
-    def _(event):
+    def _down(event):
         nonlocal selected_index
         selected_index = (selected_index + 1) % len(items)
 
     @kb.add("space")
-    def _(event):
+    def _toggle(event):
         if selected_index in checked_indices:
             checked_indices.remove(selected_index)
         else:
             checked_indices.add(selected_index)
 
     @kb.add("a")
-    def _(event):
+    def _all(event):
         if len(checked_indices) == len(items):
             checked_indices.clear()
         else:
@@ -323,50 +442,55 @@ def multi_selection_menu(items, title, formatter=None):
                 checked_indices.add(i)
 
     @kb.add("enter")
-    def _(event):
-        event.app.exit(result=[items[i] for i in sorted(list(checked_indices))])
+    def _confirm(event):
+        event.app.exit(result=[items[i] for i in sorted(checked_indices)])
 
     @kb.add("b")
     @kb.add("q")
-    def _(event):
+    def _cancel(event):
         event.app.exit(result=[])
 
     def get_formatted_text():
         res = []
-        res.append(("class:title", f" {title} \n"))
-        res.append(("class:border", "─" * 60 + "\n"))
+        count = len(checked_indices)
+        res.append(("class:header", f"  ══  {title}  ({count} selected)  ══\n"))
+        res.append(("class:border", "─" * 66 + "\n"))
 
-        for i in range(len(items)):
-            item = items[i]
-            display = formatter(item) if formatter else format_item(item)
-            clean_display = display.replace(f"[bold {TEXT}]", "").replace(
-                f"[/bold {TEXT}]", ""
-            )
+        visible_start = max(0, selected_index - 12)
+        visible_end   = min(len(items), visible_start + 25)
 
-            checkbox = " [x]" if i in checked_indices else " [ ]"
-            prefix = " ▶" if i == selected_index else "  "
+        if visible_start > 0:
+            res.append(("class:dim", f"  ↑ {visible_start} more above\n"))
+
+        for i in range(visible_start, visible_end):
+            item     = items[i]
+            raw      = formatter(item) if formatter else format_item(item)
+            disp     = _strip_rich(raw)
+            checkbox = " [✓]" if i in checked_indices else " [ ]"
+            cursor   = "▶ " if i == selected_index else "  "
 
             if i == selected_index:
-                res.append(("class:selected", f"{prefix}{checkbox} {clean_display} \n"))
+                res.append(("class:selected", f"  {cursor}{checkbox}  {disp}\n"))
             else:
-                res.append(("class:item", f"{prefix}{checkbox} {clean_display} \n"))
+                res.append(("class:item", f"  {cursor}{checkbox}  {disp}\n"))
 
-        res.append(("class:border", "─" * 60 + "\n"))
-        res.append(
-            (
-                "class:help",
-                " [↑/↓] Navigate  [Space] Toggle  [A] Select All  [Enter] Confirm  [B/Q] Back ",
-            )
-        )
+        remaining = len(items) - visible_end
+        if remaining > 0:
+            res.append(("class:dim", f"  ↓ {remaining} more below\n"))
+
+        res.append(("class:border", "\n" + "─" * 66 + "\n"))
+        res.append(("class:help", _HELP_MULTI))
         return res
 
+    hl_fg = _get_highlight_fg()
     style = Style.from_dict(
         {
-            "title": f"bold {PRIMARY}",
-            "border": f"{PRIMARY}",
-            "selected": f"bg:{PRIMARY} fg:#ffffff bold",
-            "item": f"{TEXT}",
-            "help": f"italic {ACCENT}",
+            "header":   f"bold {PRIMARY}",
+            "border":   f"dim {PRIMARY}",
+            "selected": f"bg:{PRIMARY} fg:{hl_fg} bold",
+            "item":     f"{TEXT}",
+            "help":     f"italic dim {TEXT}",
+            "dim":      f"dim {TEXT}",
         }
     )
 
@@ -376,4 +500,5 @@ def multi_selection_menu(items, title, formatter=None):
         style=style,
         full_screen=False,
     )
-    return app.run()
+    return app.run() or []
+

@@ -27,7 +27,7 @@ DOWNLOADS_FILE = os.path.expanduser("~/.cinema-cli-downloads.json")
 
 
 class DownloadManager:
-    def __init__(self, max_workers=1, downloads_dir=None, api_client=None):
+    def __init__(self, max_workers=1, downloads_dir=None, api_client=None, settings=None):
         self.queue = load_json_data(DOWNLOADS_FILE) or []
         # Reset any 'downloading' status to 'pending' on startup
         for task in self.queue:
@@ -40,6 +40,7 @@ class DownloadManager:
         self.active_tasks = {}  # task_id -> future
         self._current_task_id = None  # Track the single active download
         self.api_client = api_client
+        self.settings = settings or {}
         self.downloads_dir = downloads_dir or os.path.join(os.path.expanduser("~"), "Downloads", "cinema-cli")
         # Use user's temp directory instead of os.getcwd() to avoid system32 issues
         self.temp_dir = os.path.join(tempfile.gettempdir(), "cinema-cli-temp")
@@ -96,7 +97,7 @@ class DownloadManager:
         except Exception:
             pass
 
-    def add_task(self, url, filename, title, subtitles=None, headers=None, meta=None, fallback_sources=None, api_params=None, preferred_sub_lang='ar', include_all_subs=True, fallback_sub_langs=None):
+    def add_task(self, url, filename, title, subtitles=None, headers=None, meta=None, fallback_sources=None, api_params=None, preferred_sub_lang='ar', include_all_subs=True, preferred_sub_langs=None, fallback_sub_langs=None, quality=None):
         task = {
             "id": str(uuid.uuid4()),
             "url": url,
@@ -105,11 +106,14 @@ class DownloadManager:
             "subtitles": subtitles,
             "preferred_sub_lang": preferred_sub_lang,
             "include_all_subs": include_all_subs,
+            "preferred_sub_langs": preferred_sub_langs or ([preferred_sub_lang] if preferred_sub_lang else ["ar"]),
             "fallback_sub_langs": fallback_sub_langs,
             "headers": headers,
             "meta": meta,
+            "quality": quality,
             "fallback_sources": fallback_sources or [],
             "api_params": api_params,
+            "speed_limit_mb": self.settings.get("download_speed_limit", 0),
             "status": "pending",
             "progress": 0,
             "speed": "0 B/s",
@@ -124,7 +128,6 @@ class DownloadManager:
             self.queue.append(task)
             self._save()
         console.print(f"[green]Added to download queue: {title}[/green]")
-        time.sleep(1)
 
     def _save(self, force=False):
         """Save queue state with throttling to reduce disk I/O."""
@@ -394,28 +397,34 @@ class DownloadManager:
         include_all = bool(task.get("include_all_subs", True))
         fallback_langs = task.get("fallback_sub_langs")
 
+        # Ordered multi-language list (primary first)
+        raw_pref_langs = task.get("preferred_sub_langs") or [preferred]
+        if not isinstance(raw_pref_langs, list) or not raw_pref_langs:
+            raw_pref_langs = [preferred]
+
         def norm_lang(lang: str) -> str:
             l = (lang or "").strip().lower()
-            # common mappings
-            if l in ["arabic", "ara", "ar"]:
-                return "ar"
-            if l in ["english", "eng", "en"]:
-                return "en"
-            if l in ["french", "fre", "fra", "fr"]:
-                return "fr"
-            if l in ["spanish", "spa", "es"]:
-                return "es"
-            if len(l) == 3 and l.endswith("a") and l[:2] in ["ar", "en", "fr", "es"]:
-                return l[:2]
+            if l in ["arabic", "ara", "ar"]:   return "ar"
+            if l in ["english", "eng", "en"]:  return "en"
+            if l in ["french", "fre", "fra", "fr"]:  return "fr"
+            if l in ["spanish", "spa", "es"]:  return "es"
+            if l in ["german", "deu", "ger", "de"]:  return "de"
+            if l in ["turkish", "tur", "tr"]:  return "tr"
+            if l in ["portuguese", "por", "pt"]: return "pt"
+            if l in ["italian", "ita", "it"]:  return "it"
+            if l in ["chinese", "zho", "chi", "zh"]: return "zh"
+            if l in ["japanese", "jpn", "ja"]: return "ja"
+            if l in ["korean", "kor", "ko"]:   return "ko"
+            if l in ["hindi", "hin", "hi"]:    return "hi"
             return l or "und"
 
         def display_lang(code: str) -> str:
             m = {
-                "ar": "Arabic",
-                "en": "English",
-                "fr": "French",
-                "es": "Spanish",
-                "und": "Unknown",
+                "ar": "Arabic", "en": "English", "fr": "French",
+                "es": "Spanish", "de": "German", "tr": "Turkish",
+                "pt": "Portuguese", "it": "Italian",
+                "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
+                "hi": "Hindi", "und": "Unknown",
             }
             return m.get(code, code)
 
@@ -424,9 +433,14 @@ class DownloadManager:
         if preferred == "none":
             return
 
+        wanted = [norm_lang(l) for l in raw_pref_langs if l]
+        if not wanted:
+            wanted = [preferred]
+        elif wanted[0] != preferred:
+            wanted = [preferred] + [l for l in wanted if l != preferred]
+
         # Build subtitle list from API payload
         subs = task.get("subtitles") or []
-        # normalize and filter items that have url
         items = []
         for s in subs:
             if isinstance(s, dict) and s.get("url"):
@@ -435,7 +449,7 @@ class DownloadManager:
                     "url": s.get("url"),
                 })
 
-        # If API didn't provide subtitles, fall back to OpenSubtitles (multi-language)
+        # If API didn't provide subtitles, fall back to OpenSubtitles
         if not items:
             try:
                 yr = sn = epn = None
@@ -445,16 +459,27 @@ class DownloadManager:
                     sn = meta.get("season")
                     epn = meta.get("episode")
 
-                langs = []
+                # Request langs: wanted first, then fallback_langs, then ar+en
+                langs = list(wanted) if include_all else [preferred]
                 if isinstance(fallback_langs, (list, tuple)):
-                    langs = [str(x).strip().lower() for x in fallback_langs if str(x).strip()]
-                if not langs:
-                    langs = [preferred, "ar", "en"]
+                    for x in fallback_langs:
+                        c = str(x).strip().lower()
+                        if c and c not in langs:
+                            langs.append(c)
+                for last in ("ar", "en"):
+                    if last not in langs:
+                        langs.append(last)
 
                 subs_found = fetch_subtitles(task.get("title") or "", langs, year=yr, season=sn, episode=epn)
                 if subs_found:
                     base, _ = os.path.splitext(task.get("filename") or task.get("title") or "video")
                     base = os.path.basename(base)
+                    # Sort by wanted-list priority
+                    def _sk(s):
+                        lc = norm_lang(str(s.get("lang") or "und"))
+                        try: return langs.index(lc)
+                        except ValueError: return len(langs)
+                    subs_found = sorted(subs_found, key=_sk)
                     downloaded = []
                     for s in subs_found:
                         lang = norm_lang(str(s.get("lang") or "und"))
@@ -466,7 +491,6 @@ class DownloadManager:
                         if not include_all:
                             break
                     if downloaded:
-                        downloaded.sort(key=lambda x: (0 if x["lang"] == preferred else 1, x["lang"]))
                         with self.lock:
                             task["subtitle_files"] = downloaded
                             task["subtitle_file"] = downloaded[0]["path"]
@@ -476,21 +500,26 @@ class DownloadManager:
                 self._log(f"OpenSubtitles fallback failed: {e}", level="WARNING")
             return
 
-        preferred_items = [x for x in items if x["lang"] == preferred]
+        # Build ordered list from source subtitles: wanted langs first (in priority order)
         ordered = []
-        if preferred_items:
-            ordered.append(preferred_items[0])
+        seen_url = set()
+        seen_lang = set()
+        for lang in (wanted if include_all else wanted[:1]):
+            for x in items:
+                if x["lang"] == lang and x["url"] not in seen_url and x["lang"] not in seen_lang:
+                    ordered.append(x)
+                    seen_url.add(x["url"])
+                    seen_lang.add(x["lang"])
+                    break
 
         if include_all:
-            seen = {x["url"] for x in ordered}
-            seen_lang = {x["lang"] for x in ordered}
             for x in items:
-                if x["url"] in seen or x["lang"] in seen_lang:
-                    continue
-                ordered.append(x)
-                seen.add(x["url"])
-                seen_lang.add(x["lang"])
-        elif not ordered and items:
+                if x["url"] not in seen_url and x["lang"] not in seen_lang:
+                    ordered.append(x)
+                    seen_url.add(x["url"])
+                    seen_lang.add(x["lang"])
+
+        if not ordered and items:
             ordered.append(items[0])
 
         if not ordered:
@@ -679,17 +708,55 @@ class DownloadManager:
             return False
 
     def _download_with_ytdlp(self, url, output_path, task, source, is_worker):
-        """Execute yt-dlp with optimized parameters for faster downloads."""
+        """Execute yt-dlp with optimized parameters for faster, more reliable HLS downloads.
+
+        All sources from providers are HLS (m3u8) streams — there is no direct-MP4
+        alternative path from these CDNs.  The flags below are tuned specifically for HLS:
+
+        KEY CHOICES
+        -----------
+        --hls-prefer-native REMOVED:
+            Forces yt-dlp's Python HLS downloader instead of delegating to ffmpeg.
+            The native downloader has worse fragment-error recovery and produces an
+            intermediate .ts file that needs a full extra transcode pass.  Without
+            this flag yt-dlp uses ffmpeg directly as the HLS fragment downloader,
+            which avoids the extra mux step for well-formed streams.
+
+        --hls-use-mpegts REMOVED:
+            Merges all fragments into a single .ts container *while* downloading, then
+            hands that .ts to ffmpeg for remux.  Any PTS/DTS discontinuity in a CDN
+            ad-splice fragment is baked into the TS and propagates into the final mp4.
+            Without it, yt-dlp+ffmpeg handles each fragment in isolation and then does
+            a clean merge — the canonical path that avoids the "fragment mixing" issue.
+
+        --http-chunk-size REMOVED:
+            Applies only to plain HTTP downloads, not to HLS fragment requests.
+            Setting it high had no effect on fragment streams and wasted memory.
+
+        --retry-sleep changed 0.5 → "fragment:exp=1:20":
+            Exponential back-off on fragment retries, caps at 20 s.  0.5 s flat retry on CDN failures
+            hammers the server and triggers 429 rate-limiting, which compounds errors.
+
+        --fragment-retries reduced 20 → 10:
+            Combined with exponential back-off, 10 retries with growing delays give
+            a CDN plenty of time to recover without waiting forever.
+
+        aria2c --async-dns=false REMOVED:
+            Intended for Linux; on Windows it causes up to 5 s DNS stall per
+            connection.  Removed to fix connection setup latency on Windows.
+        """
         if not shutil.which("yt-dlp"):
             self._log("yt-dlp not found in PATH, skipping", level="WARNING")
             return False
 
-        # Aggressive optimization for fragment concurrency
-        # Workers get moderate concurrency, regular sources get maximum
-        fragments = os.getenv("YTDLP_CONCURRENT_FRAGMENTS") or ("8" if is_worker else "64")
-        
+        # Fragment concurrency: workers (behind Cloudflare) get conservative concurrency
+        # to avoid 429s; regular CDN sources get full parallelism.
+        fragments = os.getenv("YTDLP_CONCURRENT_FRAGMENTS") or ("8" if is_worker else "16")
+
         output_path = os.path.abspath(output_path)
         output_dir = os.path.dirname(output_path)
+
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
 
         cmd = [
             "yt-dlp",
@@ -699,40 +766,80 @@ class DownloadManager:
             "--merge-output-format", "mp4",
             "--newline",
             "--no-warnings",
-            "--hls-prefer-native",
+            # Let ffmpeg be the HLS fragment downloader (not the Python native one).
+            # Result: better fragment recovery, no intermediate .ts merge step.
             "--no-check-certificates",
-            "--fragment-retries", "20",
-            "--retry-sleep", "0.5",
+            "--fragment-retries", "10",
+            # Exponential back-off: start at 1s, double each retry, cap at 20s.
+            # Prevents hammering CDNs and triggering 429 rate limits.
+            "--retry-sleep", "fragment:exp=1:20",
             "--concurrent-fragments", fragments,
-            "--socket-timeout", "15",
+            "--socket-timeout", "20",
             "--retries", "8",
             "--no-playlist",
-            # Ensure frame-accurate merging and A/V sync
-            "--hls-use-mpegts",  # Use MPEG-TS for better fragment handling
-            "--fixup", "detect_or_warn",
+            # fixup=never: let ffmpeg handle container-level fixup during mux;
+            # avoids a redundant second ffmpeg pass on the already-muxed file.
+            "--fixup", "never",
             "--prefer-ffmpeg",
-            "--ffmpeg-location", shutil.which("ffmpeg") or "ffmpeg",
-            # Aggressive performance optimizations
+            "--ffmpeg-location", ffmpeg_bin,
+            # Buffer: large read-ahead reduces fragment stall pauses.
             "--buffer-size", "1M",
-            "--http-chunk-size", "50M",
-            # Post-processing: only fix negative timestamps; do NOT touch frame/sample timing.
-            # -vsync cfr / -async 1 duplicate/drop frames and resample audio, causing A/V desync.
-            "--postprocessor-args", "ffmpeg:-avoid_negative_ts make_non_negative -max_interleave_delta 0",
-            # Skip unnecessary metadata processing
+            # Post-processing: only safe timestamp flags - no frame/sample manipulation.
+            "--postprocessor-args",
+            f"ffmpeg:-avoid_negative_ts make_non_negative -max_interleave_delta 0 "
+            f"-probesize 50M -analyzeduration 50M",
+            # Skip writing sidecar files
             "--no-write-description",
             "--no-write-info-json",
             "--no-write-thumbnail",
+            # Resume partial downloads: yt-dlp picks up where it left off
+            # if the temp fragment directory / partial file is still present.
+            "--continue",
         ]
-        
-        # Add aria2c if available (much faster for HLS/fragmented streams)
-        if shutil.which("aria2c"):
-            # Aggressive connection settings for maximum speed
-            conn = os.getenv("ARIA2C_CONNECTIONS") or ("12" if is_worker else "64")
+
+        # Quality / format selection: when the user chose a specific resolution,
+        # tell yt-dlp to pick the matching HLS variant from the m3u8 manifest.
+        # For HLS sources the format selector targets video height; bestaudio covers
+        # the separated audio playlist when the manifest uses DASH-style tracks.
+        quality = task.get("quality")
+        if quality and quality not in ("auto", "best"):
+            q = quality.lower().replace("p", "").strip()
+            height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360}
+            height = height_map.get(q)
+            if height is None:
+                try:
+                    height = int(q)
+                except ValueError:
+                    height = None
+            if height is not None:
+                fmt = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+                cmd.extend(["--format", fmt])
+
+        # Add aria2c for non-HLS (direct MP4) URLs only; HLS fragments are managed
+        # by yt-dlp+ffmpeg natively, and routing them through aria2c adds overhead.
+        # We detect plain HTTP files by absence of .m3u8 in the URL.
+        is_hls = ".m3u8" in url.lower() or "m3u8" in url.lower()
+        if not is_hls and shutil.which("aria2c"):
+            conn = os.getenv("ARIA2C_CONNECTIONS") or ("12" if is_worker else "32")
             cmd.extend([
                 "--downloader", "aria2c",
-                "--downloader-args", f"aria2c:-x {conn} -s {conn} -k 5M --file-allocation=none --async-dns=false --max-tries=10 --retry-wait=1 --timeout=30 --connect-timeout=10 --split={conn}"
+                # --async-dns=false removed: causes 5s DNS stall per connection on Windows.
+                "--downloader-args",
+                f"aria2c:-x {conn} -s {conn} -k 5M --file-allocation=none "
+                f"--max-tries=10 --retry-wait=2 --timeout=30 "
+                f"--connect-timeout=10 --split={conn}"
             ])
-        
+
+        # Speed throttle: --limit-rate caps yt-dlp bandwidth (user-configurable)
+        speed_limit_mb = 0
+        try:
+            speed_limit_mb = float(task.get("speed_limit_mb") or 0)
+        except (TypeError, ValueError):
+            pass
+        if speed_limit_mb > 0:
+            # yt-dlp accepts bytes/s; convert MB/s → bytes/s
+            cmd.extend(["--limit-rate", f"{int(speed_limit_mb * 1024 * 1024)}"])
+
         # Add headers
         headers = source.get("headers") or {}
         ua = headers.get("User-Agent") or headers.get("user-agent")
@@ -1374,12 +1481,87 @@ class DownloadManager:
             try:
                 self._organize_download(task, temp_path)
                 self._embed_subtitles(task)
+                self._notify_completion(task["title"], success=True)
+                # Record provider success so it rises in future rankings
+                _provider = (task.get("meta") or {}).get("provider") or ""
+                if _provider:
+                    try:
+                        from src.utils.validator import report_source_result
+                        report_source_result(_provider, True)
+                    except Exception:
+                        pass
             except Exception as e:
                 self._log(f"Post-processing failed: {e}", level="ERROR")
                 with self.lock:
                     task["status"] = "error"
                     task["error_log"] = f"Post-processing: {str(e)}"
                     self._save(force=True)
+        else:
+            # Record provider failure
+            _provider = (task.get("meta") or {}).get("provider") or ""
+            if _provider:
+                try:
+                    from src.utils.validator import report_source_result
+                    report_source_result(_provider, False)
+                except Exception:
+                    pass
+
+    def _notify_completion(self, title: str, success: bool = True):
+        """Send a desktop notification when a download finishes."""
+        msg   = f"\u2705 Download complete: {title}" if success else f"\u274c Download failed: {title}"
+        icon  = "cinema-cli"
+        def _fire():
+            try:
+                if sys.platform == "win32":
+                    # Try winotify first, then plyer, then toast fallbacks
+                    try:
+                        from winotify import Notification, audio
+                        toast = Notification(
+                            app_id="Cinema CLI",
+                            title="Cinema CLI",
+                            msg=msg,
+                            duration="short",
+                        )
+                        toast.show()
+                        return
+                    except ImportError:
+                        pass
+                    try:
+                        from plyer import notification as _plyer
+                        _plyer.notify(title="Cinema CLI", message=msg, timeout=6)
+                        return
+                    except ImportError:
+                        pass
+                    # Last resort: PowerShell toast (no extra deps)
+                    ps_cmd = (
+                        f'[Windows.UI.Notifications.ToastNotificationManager, '
+                        f'Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null;'
+                        f'$t="""<toast><visual><binding template=\"ToastText01\">'
+                        f'<text id=\"1\">{msg}</text></binding></visual></toast>""";'
+                        f'$x=[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, '
+                        f'ContentType=WindowsRuntime]::New();$x.LoadXml($t);'
+                        f'$n=[Windows.UI.Notifications.ToastNotification]::New($x);'
+                        f'[Windows.UI.Notifications.ToastNotificationManager]'
+                        f'::CreateToastNotifier("Cinema CLI").Show($n)'
+                    )
+                    subprocess.run(
+                        ["powershell", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+                        capture_output=True, timeout=5,
+                    )
+                elif sys.platform == "darwin":
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'display notification "{msg}" with title "Cinema CLI"'],
+                        capture_output=True, timeout=5,
+                    )
+                else:
+                    subprocess.run(
+                        ["notify-send", "-a", "Cinema CLI", "-i", icon, "Cinema CLI", msg],
+                        capture_output=True, timeout=5,
+                    )
+            except Exception:
+                pass  # Notifications are best-effort — never crash the downloader
+        threading.Thread(target=_fire, daemon=True).start()
 
     def get_queue(self):
         with self.lock:
@@ -1543,8 +1725,12 @@ class DownloadManager:
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "error",
-            "-threads", "0",        # auto-detect optimal thread count
-            "-fflags", "+genpts",   # generate missing PTS; do NOT use +igndts (breaks B-frame order)
+            "-threads", "0",           # auto-detect optimal thread count
+            # probesize/analyzeduration: tell ffmpeg to read enough of the stream
+            # up-front so it finds all tracks without stalling mid-mux.
+            "-probesize", "50M",
+            "-analyzeduration", "50M",
+            "-fflags", "+genpts",      # generate missing PTS; do NOT use +igndts (breaks B-frame order)
             "-y",
             "-i", video_file
         ]

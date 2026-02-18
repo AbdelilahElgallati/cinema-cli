@@ -224,6 +224,15 @@ import { getCacheStats } from './src/cache/cache.js';
 import { startup } from './src/utils/startup.js';
 import { fileURLToPath } from 'url';
 
+// Derive PORT from BACKEND_URL when not set explicitly
+if (!process.env.PORT && process.env.BACKEND_URL) {
+  try {
+    const _u = new URL(process.env.BACKEND_URL);
+    process.env.PORT = _u.port || (_u.protocol === 'https:' ? '443' : '80');
+  } catch (_) {
+    process.env.PORT = '3000';
+  }
+}
 const PORT = process.env.PORT || 3000;
 
 const app = express();

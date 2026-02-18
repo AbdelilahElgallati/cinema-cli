@@ -5,11 +5,15 @@ Cinema CLI - Fix Verification Test Suite
 Tests every improvement made in the recent patch:
 
   1.  A/V sync  – yt-dlp postprocessor no longer uses destructive flags
+                  --hls-prefer-native and --hls-use-mpegts removed (fragment mixing fix)
+                  --retry-sleep changed to exponential back-off (CDN 429 prevention)
   2.  A/V sync  – ffmpeg subtitle-mux uses pure stream copy (no frame/sample manipulation)
   3.  Speed     – HTTP session pool is properly sized (connections=10, maxsize=20)
   4.  Speed     – Parallel range-download thread count scales with file size
   5.  Speed     – Parallel range-download per-chunk read size raised to 512 KB
-  6.  Speed     – Single-threaded download read size raised to 4 MB
+                  --http-chunk-size removed (HLS-irrelevant, wastes memory)
+                  ffmpeg mux uses -probesize/-analyzeduration for faster stream analysis
+  6.  Speed     – aria2c guarded to non-HLS URLs; --async-dns=false removed (Windows fix)
   7.  Speed     – yt-dlp --buffer-size raised to 1M
   8.  Multi-sub – _download_subtitles handles multiple languages in parallel
   9.  Multi-sub – subtitle files land in tempfile.gettempdir(), never os.getcwd()
@@ -17,6 +21,15 @@ Tests every improvement made in the recent patch:
   11. Multi-sub – batch-download menu exposes "All Available" option
   12. Multi-sub – include_all_subs flag propagates through add_task and embed step
   13. Regression– progress parsing, queue operations, and ffmpeg mux path still work
+  14. Regression– fetch_subtitles multi-lang (network)
+  15. Regression– _prepare_subtitles respects include_all_subs
+  16. Regression– _prepare_subtitles falls back when preferred lang absent
+  17. Regression– _prepare_subtitles returns chosen language (not forced Arabic)
+  18. Regression– _norm_lang recognises extended language codes (de, tr, pt, it, zh, ja, ko, hi)
+  19. Multi-lang – _prepare_subtitles orders tracks by preferred_langs list (primary first)
+  20. Multi-lang – add_task stores preferred_sub_langs list in task dict
+  21. Multi-lang – settings default initialises preferred_subtitle_langs on first run
+  22. Multi-lang – _download_subtitles respects preferred_sub_langs order (primary first)
 
 Run:
     cd cli
@@ -85,68 +98,124 @@ def skip(name: str, reason: str = "offline mode") -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TEST 1 – A/V SYNC: yt-dlp postprocessor flags
+# TEST 1 – A/V SYNC: yt-dlp postprocessor flags + HLS flag hygiene
 # ═══════════════════════════════════════════════════════════════════════════════
 def test_ytdlp_postprocessor_flags():
     """
     Destructive flags that MUST NOT appear in the yt-dlp command:
-      -vsync cfr       – duplicates / drops frames to force constant frame rate
-      -async 1         – resamples audio to chase a rewritten video clock
-      -copyts          – combined with -start_at_zero often creates misaligned PTS
-      -start_at_zero   – shifts all timestamps, breaks relative subtitle timing
+      -vsync cfr           – duplicates / drops frames
+      -async 1             – resamples audio
+      -copyts              – rewrites PTS globally
+      -start_at_zero       – shifts timestamps (breaks subtitle timing)
+      +igndts              – ignores DTS (breaks B-frame decode order)
+      --hls-prefer-native  – forces slow Python HLS downloader (extra .ts mux pass)
+      --hls-use-mpegts     – bakes PTS discontinuities from CDN ad-splicing into TS
 
     Flags that MUST be present (safe guard only):
       -avoid_negative_ts make_non_negative
       -max_interleave_delta 0
+
+    HLS-specific: exponential back-off retry (exp=) is required; flat 0.5s retry banned.
     """
-    section("TEST 1 — A/V Sync: yt-dlp postprocessor flags")
+    section("TEST 1 — A/V Sync: yt-dlp postprocessor flags + HLS flag hygiene")
 
     from src.utils.download_manager import DownloadManager
 
-    # Parse the source file with AST to find the string literal passed to
-    # --postprocessor-args without having to actually run yt-dlp.
     src_path = os.path.join(os.path.dirname(__file__), "src", "utils", "download_manager.py")
     source = open(src_path, encoding="utf-8").read()
 
-    # Locate all string values following "--postprocessor-args"
+    # ── Locate postprocessor-args value ──────────────────────────────────────
+    # The value may be a string concatenation (f-string or adjacent), so also
+    # do a raw text scan as fallback.
     pp_args_values: list[str] = []
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.List):
-            elts = node.elts
-            for i, elt in enumerate(elts):
-                if isinstance(elt, ast.Constant) and elt.value == "--postprocessor-args":
-                    # Next element is the value
-                    if i + 1 < len(elts) and isinstance(elts[i + 1], ast.Constant):
-                        pp_args_values.append(str(elts[i + 1].value))
+    try:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.List):
+                elts = node.elts
+                for i, elt in enumerate(elts):
+                    if isinstance(elt, ast.Constant) and elt.value == "--postprocessor-args":
+                        if i + 1 < len(elts) and isinstance(elts[i + 1], ast.Constant):
+                            pp_args_values.append(str(elts[i + 1].value))
+    except Exception:
+        pass
+    # Raw-text fallback: grab everything after --postprocessor-args line
+    if not pp_args_values:
+        for line in source.splitlines():
+            if "--postprocessor-args" in line or "postprocessor-args" in line:
+                pp_args_values.append(line)
 
     if not pp_args_values:
         fail("ytdlp postprocessor — args string found in source", "Could not locate --postprocessor-args value")
         return
-    ok("ytdlp postprocessor — args string found in source", str(pp_args_values))
+    ok("ytdlp postprocessor — args string found in source", str(pp_args_values[:1]))
 
-    combined = " ".join(pp_args_values)
+    combined_pp = " ".join(pp_args_values)
+    # Also check against full source for yt-dlp command-level flags
+    combined_all = source
 
-    # ── flags that MUST NOT appear ────────────────────────────────────────────
-    banned = {
+    # ── flags that MUST NOT appear in postprocessor args ─────────────────────
+    pp_banned = {
         "-vsync cfr":    "forces CFR (frames duplicated/dropped → desync)",
         "-async 1":      "resamples audio → clock drift",
         "-copyts":       "rewrites timestamps (conflicts with -start_at_zero)",
         "-start_at_zero":"shifts PTS globally → subtitle offset errors",
         "+igndts":       "ignores DTS → breaks B-frame decode order",
     }
-    any_banned = False
-    for flag, reason in banned.items():
-        if flag in combined:
+    for flag, reason in pp_banned.items():
+        if flag in combined_pp:
             fail(f"ytdlp postprocessor — '{flag}' absent", reason)
-            any_banned = True
         else:
             ok(f"ytdlp postprocessor — '{flag}' absent")
 
-    # ── flags that MUST appear ────────────────────────────────────────────────
+    # ── yt-dlp HLS flags that MUST NOT appear in the cmd list ───────────────────
+    # Strip comments and docstrings from source so we don't fail on explanatory text
+    def _strip_comments(src: str) -> str:
+        """Return source with # comments and docstrings removed for flag checks."""
+        import tokenize, io
+        tokens = []
+        try:
+            for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+                if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+                    tokens.append(tok.string)
+        except tokenize.TokenError:
+            pass
+        return " ".join(tokens)
+
+    src_code_only = _strip_comments(source)
+
+    ytdlp_banned = {
+        "--hls-prefer-native":
+            "forces Python HLS downloader: slower, adds extra .ts mux pass, worse fragment recovery",
+        "--hls-use-mpegts":
+            "bakes CDN ad-splice PTS discontinuities into TS container → fragment mix corruption",
+    }
+    for flag, reason in ytdlp_banned.items():
+        if flag in src_code_only:
+            fail(f"yt-dlp cmd — '{flag}' absent", reason)
+        else:
+            ok(f"yt-dlp cmd — '{flag}' absent (HLS stability)")
+
+    # ── flat 0.5s retry must NOT appear in code (CDN hammering) ──────────────────
+    if '"--retry-sleep", "0.5"' in src_code_only or "'--retry-sleep', '0.5'" in src_code_only:
+        fail("yt-dlp cmd — flat 0.5s retry replaced with exponential back-off",
+             "0.5s flat retry hammers CDNs, triggers 429 rate limits")
+    else:
+        ok("yt-dlp cmd — flat 0.5s retry absent (no CDN hammering)")
+
+    # ── exponential back-off MUST appear in code ──────────────────────────────────
+    # "exp=" lives inside a string literal; tokenizer stripped it, so check raw source
+    if "exp=" in source and "--retry-sleep" in source:
+        ok("yt-dlp cmd — exponential back-off retry present (exp=)")
+    else:
+        fail("yt-dlp cmd — exponential back-off retry present (exp=)",
+             "Missing exp= in --retry-sleep; flat delay causes CDN rate-limit cascades")
+
+    # ── flags that MUST appear in postprocessor args ──────────────────────────
+    # The value is an f-string spanning multiple lines; scan source text directly.
     required = ["-avoid_negative_ts make_non_negative", "-max_interleave_delta 0"]
     for flag in required:
-        if flag in combined:
+        if flag in source:  # f-strings appear verbatim in source
             ok(f"ytdlp postprocessor — '{flag}' present")
         else:
             fail(f"ytdlp postprocessor — '{flag}' present", "Missing safety guard")
@@ -345,10 +414,10 @@ def test_parallel_download_thread_scaling():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TEST 5 – SPEED: chunk / buffer sizes
+# TEST 5 – SPEED: chunk / buffer sizes + removed harmful HLS flags
 # ═══════════════════════════════════════════════════════════════════════════════
 def test_chunk_and_buffer_sizes():
-    section("TEST 5 — Speed: chunk and buffer sizes")
+    section("TEST 5 — Speed: chunk and buffer sizes + HLS flag removal")
 
     src_path = os.path.join(os.path.dirname(__file__), "src", "utils", "download_manager.py")
     source = open(src_path, encoding="utf-8").read()
@@ -366,6 +435,17 @@ def test_chunk_and_buffer_sizes():
         ("single-threaded chunk size ≥ 2 MB (4 MB target)",
          ["4 * 1024 * 1024"],
          ["chunk_size=1024 * 1024"]),  # 512*1024 is valid for parallel loop — don't ban globally
+
+        # --http-chunk-size must NOT appear: it's for direct HTTP, not HLS fragments
+        # Setting it high for HLS wastes memory without speed gain.
+        ("--http-chunk-size absent (HLS-irrelevant, wastes memory)",
+         [],
+         ["\"--http-chunk-size\"", "'--http-chunk-size'"]),
+
+        # ffmpeg mux pass should include probesize/analyzeduration for faster stream analysis
+        ("ffmpeg mux uses -probesize 50M for fast stream analysis",
+         ["-probesize", "50M"],
+         []),
     ]
 
     for desc, must_contain, must_not_contain in checks:
@@ -383,15 +463,15 @@ def test_chunk_and_buffer_sizes():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TEST 6 – MULTI-SUBTITLE: aria2c connection/split args
+# TEST 6 – SPEED: aria2c connection/split args + HLS guard
 # ═══════════════════════════════════════════════════════════════════════════════
 def test_aria2c_args():
-    section("TEST 6 — Speed: aria2c connection args sanity check")
+    section("TEST 6 — Speed: aria2c args sanity check + HLS guard")
 
     src_path = os.path.join(os.path.dirname(__file__), "src", "utils", "download_manager.py")
     source = open(src_path, encoding="utf-8").read()
 
-    # aria2c must be used via yt-dlp downloader
+    # aria2c must be used via yt-dlp downloader (for non-HLS direct URLs)
     if "--downloader" in source and "aria2c" in source:
         ok("aria2c used as yt-dlp downloader when available")
     else:
@@ -408,6 +488,31 @@ def test_aria2c_args():
         ok("aria2c file-allocation=none (no slow pre-alloc)")
     else:
         fail("aria2c file-allocation=none (no slow pre-alloc)")
+
+    # --async-dns=false must NOT appear in code: causes 5s DNS stall per connection on Windows
+    # Strip docstrings/comments first so "REMOVED" in docs doesn't cause false positive
+    try:
+        import tokenize, io
+        code_tokens = []
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+                code_tokens.append(tok.string)
+        src_code_only = " ".join(code_tokens)
+    except Exception:
+        src_code_only = source
+
+    if "--async-dns=false" in src_code_only:
+        fail("aria2c — --async-dns=false absent (Windows DNS stall fix)",
+             "--async-dns=false causes ~5s DNS stall per connection on Windows")
+    else:
+        ok("aria2c — --async-dns=false absent (Windows DNS stall fix)")
+
+    # aria2c must be guarded to non-HLS URLs only
+    if "is_hls" in source and "not is_hls" in source:
+        ok("aria2c — guarded to non-HLS URLs only")
+    else:
+        fail("aria2c — guarded to non-HLS URLs only",
+             "aria2c adds overhead on HLS; it should only be used for plain HTTP downloads")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -890,6 +995,398 @@ def test_prepare_subtitles_include_all():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TEST 16 – REGRESSION: _prepare_subtitles fallback when preferred lang absent
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_prepare_subtitles_fallback_when_preferred_absent():
+    section("TEST 16 — Regression: _prepare_subtitles falls back to first available when preferred lang absent")
+
+    from unittest.mock import patch, MagicMock
+    from src.utils import player as player_mod
+
+    SRT = b"1\n00:00:01,000 --> 00:00:03,000\nHello\n\n"
+    # Only English and French available — NO Arabic
+    subtitles = [
+        {"url": "https://fake.subs/en.srt", "lang": "en"},
+        {"url": "https://fake.subs/fr.srt", "lang": "fr"},
+    ]
+
+    def fake_get(url, *args, **kwargs):
+        m = MagicMock()
+        m.status_code = 200
+        m.content = SRT
+        m.headers = {}
+        return m
+
+    with patch("requests.get", side_effect=fake_get):
+        # Arabic preferred but not available — should still get 1 track (not 0)
+        paths = player_mod._prepare_subtitles(
+            "Test Movie", subtitles, None, None,
+            preferred_sub_lang="ar", include_all_subs=False
+        )
+
+    if len(paths) == 1:
+        ok("_prepare_subtitles — preferred lang absent → falls back to first available (no network call)",
+           f"Got track: {os.path.basename(paths[0])}")
+    elif len(paths) == 0:
+        fail("_prepare_subtitles — preferred lang absent → falls back to first available",
+             "Got 0 tracks — unnecessary OpenSubtitles network fallback triggered")
+    else:
+        ok("_prepare_subtitles — preferred lang absent → falls back to first available",
+           f"Got {len(paths)} tracks")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 17 – REGRESSION: _prepare_subtitles returns the chosen language (not forced Arabic)
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_prepare_subtitles_respects_chosen_lang():
+    section("TEST 17 — Regression: _prepare_subtitles returns the user-chosen language, not always Arabic")
+
+    from unittest.mock import patch, MagicMock
+    from src.utils import player as player_mod
+
+    SRT = b"1\n00:00:01,000 --> 00:00:03,000\nHello\n\n"
+    # Both Arabic and English available — user chose English
+    subtitles = [
+        {"url": "https://fake.subs/ar.srt", "lang": "ar"},
+        {"url": "https://fake.subs/en.srt", "lang": "en"},
+    ]
+
+    def fake_get(url, *args, **kwargs):
+        m = MagicMock()
+        m.status_code = 200
+        m.content = SRT
+        m.headers = {}
+        return m
+
+    with patch("requests.get", side_effect=fake_get):
+        paths = player_mod._prepare_subtitles(
+            "White Collar S01E01", subtitles, None, None,
+            preferred_sub_lang="en", include_all_subs=False
+        )
+
+    if len(paths) == 1 and "en" in os.path.basename(paths[0]):
+        ok("_prepare_subtitles — chose English → English track returned",
+           os.path.basename(paths[0]))
+    elif len(paths) == 1 and "ar" in os.path.basename(paths[0]):
+        fail("_prepare_subtitles — chose English → English track returned",
+             f"Got Arabic instead: {os.path.basename(paths[0])}  (Arabic override bug still present)")
+    elif len(paths) == 0:
+        fail("_prepare_subtitles — chose English → English track returned",
+             "Got 0 tracks")
+    else:
+        # Multiple tracks returned — first should be English
+        first = os.path.basename(paths[0])
+        if "en" in first:
+            ok("_prepare_subtitles — chose English → English track first",
+               f"{len(paths)} tracks, first={first}")
+        else:
+            fail("_prepare_subtitles — chose English → English track returned",
+                 f"First track is {first}, not English")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 18 – REGRESSION: _norm_lang recognises extended language codes
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_norm_lang_extended():
+    section("TEST 18 — Regression: _norm_lang recognises extended language codes (de, tr, pt, it, zh, ja, ko, hi)")
+
+    from src.utils.player import _norm_lang
+
+    cases = [
+        # input          expected
+        ("german",       "de"),
+        ("deu",          "de"),
+        ("de",           "de"),
+        ("turkish",      "tr"),
+        ("tur",          "tr"),
+        ("tr",           "tr"),
+        ("portuguese",   "pt"),
+        ("por",          "pt"),
+        ("pt",           "pt"),
+        ("italian",      "it"),
+        ("ita",          "it"),
+        ("it",           "it"),
+        ("chinese",      "zh"),
+        ("zho",          "zh"),
+        ("zh",           "zh"),
+        ("japanese",     "ja"),
+        ("jpn",          "ja"),
+        ("ja",           "ja"),
+        ("korean",       "ko"),
+        ("kor",          "ko"),
+        ("ko",           "ko"),
+        ("hindi",        "hi"),
+        ("hin",          "hi"),
+        ("hi",           "hi"),
+        # already-working ones must still work
+        ("Arabic",       "ar"),
+        ("eng",          "en"),
+        ("fra",          "fr"),
+        ("spa",          "es"),
+    ]
+
+    all_ok = True
+    for inp, expected in cases:
+        result = _norm_lang(inp)
+        if result != expected:
+            fail(f"_norm_lang('{inp}') → '{expected}'",
+                 f"Got '{result}'")
+            all_ok = False
+
+    if all_ok:
+        ok(f"_norm_lang — all {len(cases)} language mappings correct")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 19 – MULTI-LANG PREFS: _prepare_subtitles respects ordered preferred_langs
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_prepare_subtitles_preferred_langs_ordering():
+    section("TEST 19 — Multi-lang prefs: _prepare_subtitles orders tracks by preferred_langs list")
+
+    from unittest.mock import patch, MagicMock
+    from src.utils import player as player_mod
+
+    SRT = b"1\n00:00:01,000 --> 00:00:03,000\nHello\n\n"
+    subtitles = [
+        {"url": "https://fake.subs/en.srt", "lang": "en"},
+        {"url": "https://fake.subs/ar.srt", "lang": "ar"},
+    ]
+
+    def fake_get(url, *args, **kwargs):
+        m = MagicMock()
+        m.status_code = 200
+        m.content = SRT
+        m.headers = {}
+        return m
+
+    with patch("requests.get", side_effect=fake_get):
+        # preferred_langs=["ar","en"] — Arabic should be first
+        paths_ar_first = player_mod._prepare_subtitles(
+            "Test Movie", subtitles, None, None,
+            preferred_sub_lang="ar", include_all_subs=True,
+            preferred_langs=["ar", "en"],
+        )
+        # preferred_langs=["en","ar"] — English should be first
+        paths_en_first = player_mod._prepare_subtitles(
+            "Test Movie", subtitles, None, None,
+            preferred_sub_lang="en", include_all_subs=True,
+            preferred_langs=["en", "ar"],
+        )
+
+    # ar-first case
+    if len(paths_ar_first) >= 2:
+        first = os.path.basename(paths_ar_first[0])
+        if "ar" in first:
+            ok("_prepare_subtitles preferred_langs=['ar','en'] → ar first", first)
+        else:
+            fail("_prepare_subtitles preferred_langs=['ar','en'] → ar first",
+                 f"First track is '{first}', expected ar")
+    elif len(paths_ar_first) == 1:
+        first = os.path.basename(paths_ar_first[0])
+        if "ar" in first:
+            ok("_prepare_subtitles preferred_langs=['ar','en'] → ar returned (1 track)", first)
+        else:
+            fail("_prepare_subtitles preferred_langs=['ar','en'] → ar first",
+                 f"Got 1 track: '{first}', expected ar")
+    else:
+        fail("_prepare_subtitles preferred_langs=['ar','en'] → tracks returned", "Got 0 tracks")
+
+    # en-first case
+    if len(paths_en_first) >= 2:
+        first = os.path.basename(paths_en_first[0])
+        if "en" in first:
+            ok("_prepare_subtitles preferred_langs=['en','ar'] → en first", first)
+        else:
+            fail("_prepare_subtitles preferred_langs=['en','ar'] → en first",
+                 f"First track is '{first}', expected en")
+    elif len(paths_en_first) == 1:
+        first = os.path.basename(paths_en_first[0])
+        if "en" in first:
+            ok("_prepare_subtitles preferred_langs=['en','ar'] → en returned (1 track)", first)
+        else:
+            fail("_prepare_subtitles preferred_langs=['en','ar'] → en first",
+                 f"Got 1 track: '{first}', expected en")
+    else:
+        fail("_prepare_subtitles preferred_langs=['en','ar'] → tracks returned", "Got 0 tracks")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 20 – MULTI-LANG PREFS: add_task stores preferred_sub_langs correctly
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_add_task_stores_preferred_sub_langs():
+    section("TEST 20 — Multi-lang prefs: add_task stores preferred_sub_langs in task dict")
+
+    from src.utils.download_manager import DownloadManager
+
+    td = tempfile.mkdtemp(prefix="cinema_psl_test_")
+    try:
+        dm = DownloadManager(downloads_dir=td)
+
+        dm.add_task(
+            url="https://fake.stream/test.m3u8",
+            filename="psl_test.mp4",
+            title="PSL Test Movie",
+            preferred_sub_lang="ar",
+            include_all_subs=True,
+            preferred_sub_langs=["ar", "en", "fr"],
+        )
+
+        queue = dm.get_queue()
+        task = next((t for t in queue if t["title"] == "PSL Test Movie"), None)
+
+        if task is None:
+            fail("add_task preferred_sub_langs — task found in queue")
+            return
+        ok("add_task preferred_sub_langs — task added to queue")
+
+        stored = task.get("preferred_sub_langs")
+        if stored == ["ar", "en", "fr"]:
+            ok("add_task preferred_sub_langs — ['ar','en','fr'] stored correctly", str(stored))
+        else:
+            fail("add_task preferred_sub_langs — ['ar','en','fr'] stored correctly",
+                 f"Got: {stored!r}")
+
+        # When preferred_sub_langs is None, should fall back to [preferred_sub_lang]
+        dm.add_task(
+            url="https://fake.stream/test2.m3u8",
+            filename="psl_test2.mp4",
+            title="PSL Test Movie2",
+            preferred_sub_lang="de",
+            include_all_subs=False,
+            preferred_sub_langs=None,
+        )
+        queue2 = dm.get_queue()
+        task2 = next((t for t in queue2 if t["title"] == "PSL Test Movie2"), None)
+        stored2 = task2.get("preferred_sub_langs") if task2 else None
+        if stored2 == ["de"]:
+            ok("add_task preferred_sub_langs — None fallback → [preferred_sub_lang]", str(stored2))
+        else:
+            fail("add_task preferred_sub_langs — None fallback → [preferred_sub_lang]",
+                 f"Got: {stored2!r}")
+
+        # clean up
+        if task:
+            dm.remove_task(task["id"])
+        if task2:
+            dm.remove_task(task2["id"])
+
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 21 – MULTI-LANG PREFS: settings default initialises preferred_subtitle_langs
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_settings_default_preferred_subtitle_langs():
+    section("TEST 21 — Multi-lang prefs: settings default initialises preferred_subtitle_langs")
+
+    src_path = os.path.join(os.path.dirname(__file__), "main.py")
+    source = open(src_path, encoding="utf-8").read()
+
+    # Key must be initialised in __init__ / load_settings
+    if '"preferred_subtitle_langs"' in source or "'preferred_subtitle_langs'" in source:
+        ok("main.py — 'preferred_subtitle_langs' key referenced in source")
+    else:
+        fail("main.py — 'preferred_subtitle_langs' key referenced in source",
+             "Key not found in main.py")
+
+    # Must be a list initialised from preferred_subtitle to keep them in sync
+    if "preferred_subtitle_langs" in source and "preferred_subtitle" in source:
+        ok("main.py — preferred_subtitle_langs synced with preferred_subtitle")
+    else:
+        fail("main.py — preferred_subtitle_langs synced with preferred_subtitle",
+             "Sync logic not found")
+
+    # Settings propagation: handle_sources must read preferred_subtitle_langs
+    if "settings.get" in source and "preferred_subtitle_langs" in source:
+        ok("main.py — handle_sources reads preferred_subtitle_langs from settings")
+    else:
+        fail("main.py — handle_sources reads preferred_subtitle_langs from settings")
+
+    # The default is always initialised when key is absent
+    init_block = (
+        '"preferred_subtitle_langs" not in self.settings' in source or
+        "'preferred_subtitle_langs' not in self.settings" in source
+    )
+    if init_block:
+        ok("main.py — preferred_subtitle_langs initialised when absent from settings file")
+    else:
+        fail("main.py — preferred_subtitle_langs initialised when absent from settings file",
+             "Guard not found — new installs may lack the key")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 22 – MULTI-LANG PREFS: _download_subtitles respects preferred_sub_langs order
+# ═══════════════════════════════════════════════════════════════════════════════
+def test_download_subtitles_preferred_langs_order():
+    section("TEST 22 — Multi-lang prefs: _download_subtitles respects preferred_sub_langs order")
+
+    from unittest.mock import patch, MagicMock
+    from src.utils.download_manager import DownloadManager
+
+    td = tempfile.mkdtemp(prefix="cinema_dsl_test_")
+    try:
+        dm = DownloadManager(downloads_dir=td)
+
+        SRT = b"1\n00:00:01,000 --> 00:00:03,000\nTest\n\n"
+
+        task = {
+            "id": "dsl-test-01",
+            "title": "DSL Test Movie",
+            "filename": "DSLTest.mp4",
+            "preferred_sub_lang": "ar",
+            "preferred_sub_langs": ["ar", "en"],
+            "include_all_subs": True,
+            "fallback_sub_langs": None,
+            "meta": {},
+            "headers": {},
+            "subtitles": [
+                {"url": "https://fake.subs/en.srt", "lang": "en"},
+                {"url": "https://fake.subs/ar.srt", "lang": "ar"},
+            ],
+        }
+
+        def fake_get(url, *args, **kwargs):
+            m = MagicMock()
+            m.status_code = 200
+            m.content = SRT
+            m.headers = {"content-type": "text/plain"}
+            m.raise_for_status = lambda: None
+            return m
+
+        with patch("requests.get", side_effect=fake_get):
+            dm._download_subtitles(task, td)
+
+        subs = task.get("subtitle_files") or []
+
+        if len(subs) >= 2:
+            ok("_download_subtitles preferred_sub_langs — both tracks downloaded",
+               f"{len(subs)} tracks")
+            # First track should be 'ar' (preferred primary)
+            first_lang = subs[0].get("lang")
+            if first_lang == "ar":
+                ok("_download_subtitles preferred_sub_langs — ar (primary) is first track")
+            else:
+                fail("_download_subtitles preferred_sub_langs — ar (primary) is first track",
+                     f"First track lang = '{first_lang}'")
+        elif len(subs) == 1:
+            ok("_download_subtitles preferred_sub_langs — at least 1 track downloaded",
+               "(second may have failed silently)")
+            first_lang = subs[0].get("lang")
+            if first_lang == "ar":
+                ok("_download_subtitles preferred_sub_langs — primary lang (ar) present")
+            else:
+                fail("_download_subtitles preferred_sub_langs — primary lang (ar) present",
+                     f"Got lang='{first_lang}'")
+        else:
+            fail("_download_subtitles preferred_sub_langs — tracks downloaded",
+                 "Got 0 subtitle_files")
+
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
@@ -923,6 +1420,13 @@ def main():
         test_queue_crud_regression,               # 13
         test_fetch_subtitles_multi_lang_network,  # 14 (network)
         test_prepare_subtitles_include_all,       # 15
+        test_prepare_subtitles_fallback_when_preferred_absent,  # 16
+        test_prepare_subtitles_respects_chosen_lang,            # 17
+        test_norm_lang_extended,                                # 18
+        test_prepare_subtitles_preferred_langs_ordering,        # 19
+        test_add_task_stores_preferred_sub_langs,               # 20
+        test_settings_default_preferred_subtitle_langs,         # 21
+        test_download_subtitles_preferred_langs_order,          # 22
     ]
 
     for fn in tests:

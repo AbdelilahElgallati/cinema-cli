@@ -1,9 +1,134 @@
 import json
+import os
 import re
 import requests
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from src.config import console
+
+
+# ── Persistent provider health scores ────────────────────────────────────────
+
+class ProviderScoreStore:
+    """Thread-safe, disk-backed provider success/failure counters.
+
+    Scores are keyed by lower-cased provider name.  Each entry holds:
+      - ``successes`` / ``failures``  – raw counts
+      - ``score``                     – float in [0, 100]; starts at 50 (neutral)
+      - ``last_updated``              – epoch seconds
+
+    The score is updated with an EWA (exponentially weighted average):
+        score = 0.8 * score + 0.2 * (100 if success else 0)
+
+    This means a provider needs ~5 consecutive failures to drop from 50→~33,
+    or ~5 successes to climb from 50→~67 — gradual and noise-resistant.
+    """
+
+    _EWA_ALPHA = 0.2   # weight for the newest sample
+    _NEUTRAL   = 50.0  # starting score for an unknown provider
+
+    def __init__(self, path: str):
+        self._path = path
+        self._lock = threading.Lock()
+        self._data: dict[str, dict] = {}
+        self._load()
+
+    # ── Internal ─────────────────────────────────────────────────────────────
+
+    def _load(self):
+        try:
+            if os.path.exists(self._path):
+                with open(self._path, "r", encoding="utf-8") as fh:
+                    raw = json.load(fh)
+                if isinstance(raw, dict):
+                    self._data = raw
+        except Exception:
+            self._data = {}
+
+    def _save(self):
+        try:
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._data, fh, indent=2)
+            os.replace(tmp, self._path)
+        except Exception:
+            pass
+
+    def _entry(self, provider: str) -> dict:
+        key = provider.lower().strip()
+        if key not in self._data:
+            self._data[key] = {
+                "score":        self._NEUTRAL,
+                "successes":    0,
+                "failures":     0,
+                "last_updated": time.time(),
+            }
+        return self._data[key]
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def report(self, provider: str, success: bool):
+        """Record one outcome for *provider* and persist asynchronously."""
+        if not provider:
+            return
+        with self._lock:
+            e = self._entry(provider)
+            if success:
+                e["successes"] += 1
+            else:
+                e["failures"] += 1
+            e["score"] = (1 - self._EWA_ALPHA) * e["score"] + self._EWA_ALPHA * (100 if success else 0)
+            e["last_updated"] = time.time()
+            snap = dict(self._data)          # shallow copy for safe serialisation
+        # Write in background so callers are never blocked
+        threading.Thread(target=self._save, daemon=True).start()
+
+    def get_score(self, provider: str) -> float:
+        """Return the current health score (0–100; 50 = unknown)."""
+        with self._lock:
+            return self._entry(provider.lower().strip())["score"]
+
+    def summary(self) -> dict:
+        """Return a copy of all provider data for display."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._data.items()}
+
+    def reset(self, provider: str | None = None):
+        """Reset scores — all providers if *provider* is None, or a specific one."""
+        with self._lock:
+            if provider is None:
+                self._data = {}
+            else:
+                self._data.pop(provider.lower().strip(), None)
+        self._save()
+
+
+# Module-level singleton — initialised lazily on first import
+_score_store: ProviderScoreStore | None = None
+
+def _get_score_store() -> ProviderScoreStore:
+    global _score_store
+    if _score_store is None:
+        try:
+            from src.config import PROVIDER_SCORES_FILE
+            _score_store = ProviderScoreStore(PROVIDER_SCORES_FILE)
+        except Exception:
+            _score_store = ProviderScoreStore(
+                os.path.join(os.path.expanduser("~"), ".cinema-cli", "provider_scores.json")
+            )
+    return _score_store
+
+
+def report_source_result(provider: str, success: bool):
+    """Public helper — call this after every download/stream attempt."""
+    try:
+        _get_score_store().report(provider, success)
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _extract_url(value):
@@ -165,9 +290,17 @@ def select_working_source(sources, skip_validation=False, max_parallel=5, timeou
         provider = (src.get("provider") or "").lower()
         quality = (src.get("quality") or "").lower()
         url = src.get("file", "").lower()
-        
+
         score = 100  # Base score
-        
+
+        # Persistent health score: higher health → lower sort key value (picked first).
+        # Scale from [0,100] health → [-30, +30] sort adjustment.
+        try:
+            health = _get_score_store().get_score(provider)
+            score -= int((health - 50) * 0.6)   # health=100 → -30, health=0 → +30
+        except Exception:
+            pass
+
         # Provider priority
         for i, p in enumerate(priority_providers):
             if p in provider:
@@ -301,8 +434,15 @@ def select_multiple_working_sources(sources, count=3, skip_validation=False, max
     def source_priority(src):
         provider = (src.get("provider") or "").lower()
         quality = (src.get("quality") or "").lower()
-        
+
         score = 100
+        # Persistent health bias (same formula as select_working_source)
+        try:
+            health = _get_score_store().get_score(provider)
+            score -= int((health - 50) * 0.6)
+        except Exception:
+            pass
+
         for i, p in enumerate(priority_providers):
             if p in provider:
                 score -= (i * 5)
