@@ -11,7 +11,7 @@
 ### Windows
 
 ```bat
-git clone [https://github.com/cinepro-org/cinema-cli](https://github.com/AbdelilahElgallati/cinema-cli/)
+git clone https://github.com/AbdelilahElgallati/cinema-cli/
 cd cinema-cli
 setup.bat
 ```
@@ -19,7 +19,7 @@ setup.bat
 ### Linux / macOS
 
 ```bash
-git clone [https://github.com/cinepro-org/cinema-cli](https://github.com/AbdelilahElgallati/cinema-cli/)
+git clone https://github.com/AbdelilahElgallati/cinema-cli/
 cd cinema-cli
 chmod +x setup.sh && ./setup.sh
 ```
