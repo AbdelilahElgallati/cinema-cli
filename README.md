@@ -185,13 +185,3 @@ python main.py --setup
 ## 📄 License
 
 See `LICENSE` in the repository root.
-
----
-
-If you'd like, I can also:
-
-* **Make it GitHub-perfect** (badges, screenshots, demo GIF, table of contents)
-* **Write a marketing landing README**
-* **Add installation via pip / Homebrew / Docker**
-
-Just tell me.
