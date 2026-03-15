@@ -174,12 +174,14 @@ python main.py --setup
 
 ---
 
-## 🤝 Contributing
+## Contributing
+Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) to get started.
 
-* Keep PRs small
-* Run `black .` before commit
-* Add at least one test for new features
+## Security
+If you find a security issue, please see [`SECURITY.md`](SECURITY.md).
 
+## License
+MIT — see [`LICENSE`](LICENSE).
 ---
 
 ## 📄 License
