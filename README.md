@@ -181,9 +181,6 @@ Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) to g
 If you find a security issue, please see [`SECURITY.md`](SECURITY.md).
 
 ## License
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE.txt).
+
 ---
-
-## 📄 License
-
-See `LICENSE` in the repository root.
