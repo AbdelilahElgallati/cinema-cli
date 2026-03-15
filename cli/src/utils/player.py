@@ -137,8 +137,15 @@ def _vtt_to_srt(vtt_text: str) -> str:
         if "-->" in line:
             ts_line = _re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d{3})", r"\1,\2", line)
             ts_line = _re.sub(r"(\d{2}:\d{2})\.(\d{3})", r"\1,\2", ts_line)
-            ts_line = _re.sub(r"(?<!\d)(\d{2}:\d{2},\d{3})", r"00:\1", ts_line)
             ts_line = _re.sub(r"([\d:,]+\s*-->\s*[\d:,]+)\s+.*", r"\1", ts_line)
+            m = _re.match(r"\s*([\d:,]+)\s*-->\s*([\d:,]+)\s*$", ts_line)
+            if m:
+                start_ts, end_ts = m.group(1), m.group(2)
+                if start_ts.count(":") == 1:
+                    start_ts = f"00:{start_ts}"
+                if end_ts.count(":") == 1:
+                    end_ts = f"00:{end_ts}"
+                ts_line = f"{start_ts} --> {end_ts}"
             i += 1
             text_lines = []
             while i < len(lines) and lines[i].strip():

@@ -74,14 +74,17 @@ def _vtt_to_srt(vtt_text: str) -> str:
             # Handle both HH:MM:SS.mmm and MM:SS.mmm formats
             ts_line = re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d{3})", r"\1,\2", line)
             ts_line = re.sub(r"(\d{2}:\d{2})\.(\d{3})", r"\1,\2", ts_line)
-            # Ensure HH:MM:SS format (VTT allows MM:SS,mmm without HH:)
-            ts_line = re.sub(
-                r"(?<!\d)(\d{2}:\d{2},\d{3})",
-                r"00:\1",
-                ts_line,
-            )
             # Strip VTT position/alignment settings after timestamps
             ts_line = re.sub(r"([\d:,]+\s*-->\s*[\d:,]+)\s+.*", r"\1", ts_line)
+            # Ensure HH:MM:SS format only for MM:SS,mmm timestamps.
+            m = re.match(r"\s*([\d:,]+)\s*-->\s*([\d:,]+)\s*$", ts_line)
+            if m:
+                start_ts, end_ts = m.group(1), m.group(2)
+                if start_ts.count(":") == 1:
+                    start_ts = f"00:{start_ts}"
+                if end_ts.count(":") == 1:
+                    end_ts = f"00:{end_ts}"
+                ts_line = f"{start_ts} --> {end_ts}"
             i += 1
             text_lines = []
             while i < len(lines) and lines[i].strip():
@@ -339,9 +342,12 @@ class DownloadManager:
         safe_fname = sanitize_filename(os.path.splitext(task['filename'])[0]) + ".mp4"
         mp4_out = os.path.join(temp_dir, f"{temp_id}_{safe_fname}")
 
-        # Start subtitle download in background thread (parallel with video)
+        # Start subtitle download in background thread (parallel with video).
+        # Keep fallback subtitle fetching enabled even when provider subtitles
+        # are empty, unless the user explicitly disabled subtitles.
         subtitle_future = None
-        if hasattr(self, "_download_subtitles") and task.get("subtitles"):
+        _subs_enabled = str(task.get("preferred_sub_lang") or "ar").strip().lower() not in ("none", "")
+        if hasattr(self, "_download_subtitles") and _subs_enabled:
             subtitle_executor = ThreadPoolExecutor(max_workers=1)
             subtitle_future = subtitle_executor.submit(self._download_subtitles, task, temp_dir)
             self._log("Started subtitle download in background", level="INFO")
