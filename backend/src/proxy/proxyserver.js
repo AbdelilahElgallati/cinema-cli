@@ -374,7 +374,7 @@ export function createProxyRoutes(app) {
   });
 }
 
-export function processApiResponse(apiResponse, serverUrl, req) {
+export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }) {
   if (!apiResponse.files) return apiResponse;
 
   const processedFiles = apiResponse.files.map((file) => {

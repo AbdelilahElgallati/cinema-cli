@@ -181,3 +181,43 @@ TEXT      = _theme["text"]
 BG        = "#121212"          # terminal background stays fixed
 
 console = Console()
+
+
+def apply_theme(theme_name: str) -> bool:
+    """Hot-switch the active theme at runtime.
+
+    Updates every public colour constant in this module AND reflects the change
+    back into any other module that imported the names directly (by patching
+    their module globals via sys.modules).
+    """
+    import sys as _sys
+    global _active_theme_name, _theme
+    global PRIMARY, SECONDARY, ACCENT, SUCCESS, WARNING, TEXT
+
+    if theme_name not in THEMES:
+        return False
+
+    _active_theme_name = theme_name
+    _theme = THEMES[theme_name]
+
+    PRIMARY   = _theme["primary"]
+    SECONDARY = _theme["secondary"]
+    ACCENT    = _theme["accent"]
+    SUCCESS   = _theme["success"]
+    WARNING   = _theme["warning"]
+    TEXT      = _theme["text"]
+
+    # Patch every already-imported module that grabbed a direct reference.
+    _colour_map = {
+        "PRIMARY": PRIMARY, "SECONDARY": SECONDARY, "ACCENT": ACCENT,
+        "SUCCESS": SUCCESS, "WARNING": WARNING, "TEXT": TEXT,
+    }
+    for _mod in list(_sys.modules.values()):
+        try:
+            for _name, _val in _colour_map.items():
+                if getattr(_mod, _name, None) is not None and isinstance(getattr(_mod, _name), str):
+                    setattr(_mod, _name, _val)
+        except Exception:
+            pass
+
+    return True

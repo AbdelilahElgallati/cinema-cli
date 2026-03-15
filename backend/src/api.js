@@ -17,14 +17,16 @@ import { getMultiembed } from './controllers/providers/MultiEmbed/MultiEmbed.js'
 import { getEmbedsu } from './controllers/providers/EmbedSu/embedsu.js';
 import { getFebbox } from './controllers/subs/febbox.js';
 import { validateSources } from './utils/sourceValidator.js';
+import { runSourcePipeline } from './utils/sourcePipeline.js';
 
 const shouldDebug = process.argv.includes('--debug');
 
-export async function scrapeMedia(media) {
+export async function scrapeMedia(media, options = {}) {
   // First thing - check if we already have this data cached (unless you're debugging and want fresh data)
   const cacheKey = getCacheKey(media);
+  const bypassCache = shouldDebug || options.forceRefresh === true;
 
-  if (!shouldDebug) {
+  if (!bypassCache) {
     const cachedResult = getFromCache(cacheKey);
 
     if (cachedResult) {
@@ -39,7 +41,7 @@ export async function scrapeMedia(media) {
   // If no cache or bypassed, time to do the actual workkkk
   if (shouldDebug) {
     console.log(
-      `[CACHE] ${shouldDebug ? 'Cache bypassed' : 'No cache Found'} for ${cacheKey}, work starts now...`
+      `[CACHE] ${bypassCache ? 'Cache bypassed' : 'No cache Found'} for ${cacheKey}, work starts now...`
     );
   }
   const providers = [
@@ -94,31 +96,23 @@ export async function scrapeMedia(media) {
     })
   );
 
-  let files = results
-    .filter(({ data }) => data && !(data instanceof Error || data instanceof ErrorObject))
-    .flatMap(({ data, provider }) => {
-      const fileList = Array.isArray(data.files) ? data.files : [data.files];
-      return fileList.map((f) => ({ ...f, provider }));
-    })
-    .filter(
-      (file, index, self) =>
-        file &&
-        file.file &&
-        typeof file.file === 'string' &&
-        file.file.includes('https://') &&
-        self.findIndex((f) => f.file === file.file) === index
-    );
+  const successfulResults = results.filter(
+    ({ data }) => data && !(data instanceof Error || data instanceof ErrorObject)
+  );
 
-  // Validate sources to filter out non-working ones
-  // Only validate if we have sources and not in debug mode (to speed up debugging)
+  // Contract + pipeline: collect -> normalize -> probe -> score -> rank -> return
+  const pipelineResult = await runSourcePipeline(successfulResults, {
+    probe: !shouldDebug,
+    correlationId: options.correlationId,
+  });
+
+  // Keep existing validator as a final HTTP-level filter in non-debug mode.
+  let files = pipelineResult.files || [];
   if (files.length > 0 && !shouldDebug) {
     files = await validateSources(files, 20, 2500);
   }
 
-  const subtitles = results
-    .filter(({ data }) => data && !(data instanceof Error || data instanceof ErrorObject))
-    .flatMap(({ data }) => data.subtitles)
-    .filter((sub, index, self) => sub.url && self.findIndex((s) => s.url === sub.url) === index);
+  const subtitles = pipelineResult.subtitles || [];
   // Here comes the big boy to loook for nothing okay here you go
   // We need finalResult coz you can't cache what doesn't exist yet - lowkey just consolidating the return logic
   // Build it once, cache it, return it - way cleaner than scattered returns everywhere
@@ -136,13 +130,26 @@ export async function scrapeMedia(media) {
       .filter(({ data }) => data instanceof Error || data instanceof ErrorObject)
       .map(({ data }) => data);
 
-    finalResult = { files, subtitles, errors };
+    finalResult = {
+      files,
+      subtitles,
+      quality_groups: pipelineResult.quality_groups || {},
+      pipeline: pipelineResult.pipeline,
+      correlation_id: options.correlationId || pipelineResult?.pipeline?.correlation_id,
+      errors,
+    };
   } else {
-    finalResult = { files, subtitles };
+    finalResult = {
+      files,
+      subtitles,
+      quality_groups: pipelineResult.quality_groups || {},
+      pipeline: pipelineResult.pipeline,
+      correlation_id: options.correlationId || pipelineResult?.pipeline?.correlation_id,
+    };
   }
 
   // Only cache if we actually found some streams and we're not bypassing cache
-  if (files.length > 0 && !shouldDebug) {
+  if (files.length > 0 && !bypassCache) {
     setToCache(cacheKey, finalResult);
     if (shouldDebug) {
       console.log(`[CACHE] Cached result for ${cacheKey}, next request will be much faster`);

@@ -223,6 +223,7 @@ import { ErrorObject } from './src/helpers/ErrorObject.js';
 import { getCacheStats } from './src/cache/cache.js';
 import { startup } from './src/utils/startup.js';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 // Derive PORT from BACKEND_URL when not set explicitly
 if (!process.env.PORT && process.env.BACKEND_URL) {
@@ -236,6 +237,12 @@ if (!process.env.PORT && process.env.BACKEND_URL) {
 const PORT = process.env.PORT || 3000;
 
 const app = express();
+
+function getCorrelationId(req) {
+  const incoming = req.headers['x-correlation-id'];
+  if (typeof incoming === 'string' && incoming.trim()) return incoming.trim();
+  return `backend-${crypto.randomBytes(6).toString('hex')}`;
+}
 
 // Updated CORS middleware to allow everything
 app.use(
@@ -259,6 +266,9 @@ app.get('/', (req, res) => {
 });
 
 app.get('/movie/:tmdbId', async (req, res) => {
+  const correlationId = getCorrelationId(req);
+  res.setHeader('X-Correlation-Id', correlationId);
+
   if (!checkIfPossibleTmdbId(req.params.tmdbId)) {
     return handleErrorResponse(
       res,
@@ -278,7 +288,15 @@ app.get('/movie/:tmdbId', async (req, res) => {
     return handleErrorResponse(res, media);
   }
 
-  const output = await scrapeMedia(media);
+  const forceRefresh =
+    req.query.force_refresh === '1' ||
+    req.query.force_refresh === 'true' ||
+    req.query.refresh === '1' ||
+    req.query.refresh === 'true' ||
+    req.headers['x-bypass-cache'] === '1' ||
+    req.headers['x-bypass-cache'] === 'true';
+
+  const output = await scrapeMedia(media, { forceRefresh, correlationId });
   if (output instanceof ErrorObject) {
     return handleErrorResponse(res, output);
   }
@@ -288,6 +306,9 @@ app.get('/movie/:tmdbId', async (req, res) => {
 });
 
 app.get('/tv/:tmdbId', async (req, res) => {
+  const correlationId = getCorrelationId(req);
+  res.setHeader('X-Correlation-Id', correlationId);
+
   if (
     !checkIfPossibleTmdbId(req.params.tmdbId) ||
     !checkIfPossibleTmdbId(req.query.s) ||
@@ -304,7 +325,15 @@ app.get('/tv/:tmdbId', async (req, res) => {
     return handleErrorResponse(res, media);
   }
 
-  const output = await scrapeMedia(media);
+  const forceRefresh =
+    req.query.force_refresh === '1' ||
+    req.query.force_refresh === 'true' ||
+    req.query.refresh === '1' ||
+    req.query.refresh === 'true' ||
+    req.headers['x-bypass-cache'] === '1' ||
+    req.headers['x-bypass-cache'] === 'true';
+
+  const output = await scrapeMedia(media, { forceRefresh, correlationId });
   if (output instanceof ErrorObject) {
     return handleErrorResponse(res, output);
   }

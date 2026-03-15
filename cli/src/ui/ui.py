@@ -6,6 +6,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -29,11 +30,13 @@ from src.config import (
     BG,
     PRIMARY,
     SECONDARY,
+    SETTINGS_FILE,
     SUCCESS,
     TEXT,
     WARNING,
     console,
 )
+from src.utils.storage import load_json_data
 
 
 
@@ -125,21 +128,45 @@ def show_splash():
         if _is_backend_running(url):
             return None
 
+        def _backend_launch_env(target_url: str):
+            env = os.environ.copy()
+            try:
+                parsed = urlparse(target_url or "")
+                host = (parsed.hostname or "").lower()
+                if host not in ("localhost", "127.0.0.1", ""):
+                    return env
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                if port:
+                    env["PORT"] = str(port)
+            except Exception:
+                pass
+            return env
+
         backend_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "backend")
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "backend")
         )
         show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
         stdout = None if show_logs else subprocess.DEVNULL
         stderr = None if show_logs else subprocess.DEVNULL
+        launch_env = _backend_launch_env(url)
 
         try:
             proc = subprocess.Popen(
-                "npm start", cwd=backend_dir, shell=True, stdout=stdout, stderr=stderr
+                "npm start",
+                cwd=backend_dir,
+                shell=True,
+                stdout=stdout,
+                stderr=stderr,
+                env=launch_env,
             )
         except Exception:
             try:
                 proc = subprocess.Popen(
-                    ["node", "index.js"], cwd=backend_dir, stdout=stdout, stderr=stderr
+                    ["node", "index.js"],
+                    cwd=backend_dir,
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=launch_env,
                 )
             except Exception:
                 return None
@@ -151,7 +178,9 @@ def show_splash():
 
         return proc
 
-    _backend_proc = _maybe_start_backend(BACKEND_URL)
+    settings = load_json_data(SETTINGS_FILE) or {}
+    backend_url = settings.get("backend") or BACKEND_URL
+    _backend_proc = _maybe_start_backend(backend_url)
     if _backend_proc:
         atexit.register(
             lambda: (

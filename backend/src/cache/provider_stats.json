@@ -1,0 +1,24 @@
+{
+  "providers": {
+    "TestProvider": {
+      "success": 0,
+      "no_video": 0,
+      "timeout": 0
+    },
+    "getTwoEmbed": {
+      "success": 9,
+      "no_video": 0,
+      "timeout": 0
+    },
+    "getVidrock": {
+      "success": 9,
+      "no_video": 0,
+      "timeout": 0
+    },
+    "getVidSrc": {
+      "success": 2,
+      "no_video": 0,
+      "timeout": 0
+    }
+  }
+}

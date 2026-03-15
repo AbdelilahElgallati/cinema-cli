@@ -4,7 +4,7 @@ from datetime import datetime
 from src.config import APP_LOG
 
 
-def log_event(category: str, message: str, level: str = "INFO"):
+def log_event(category: str, message: str, level: str = "INFO", correlation_id: str = ""):
     """Log an event to the application log file.
     
     Args:
@@ -14,7 +14,8 @@ def log_event(category: str, message: str, level: str = "INFO"):
     """
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_line = f"[{timestamp}] [{level}] [{category}] {message}\n"
+        corr = f" [corr={correlation_id}]" if correlation_id else ""
+        log_line = f"[{timestamp}] [{level}] [{category}]{corr} {message}\n"
         
         # Ensure log directory exists
         os.makedirs(os.path.dirname(APP_LOG), exist_ok=True)

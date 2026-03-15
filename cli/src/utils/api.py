@@ -2,6 +2,7 @@ import os
 import time
 import random
 import threading
+import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -9,6 +10,7 @@ import requests
 import urllib3
 from requests.adapters import HTTPAdapter
 from src.config import BACKEND_URL, TMDB_API_KEY, console
+from src.utils.app_logger import log_event
 from urllib3.util.retry import Retry
 
 # Suppress SSL warnings for external API providers
@@ -61,6 +63,42 @@ class APIClient:
         self._cache_ttl = 300  # 5 minutes cache TTL
         self._provider_success = {}  # Track provider success rates: {provider: {"success": 0, "fail": 0}}
         self._lock = threading.Lock()
+
+    def _new_correlation_id(self):
+        return f"cinema-{uuid.uuid4().hex[:12]}"
+
+    def _candidate_backends(self):
+        """Return backend URL candidates in priority order.
+
+        Order:
+        1) User-configured backend from settings
+        2) Environment/default BACKEND_URL
+        3) Local fallbacks commonly used by this project (3000/3010)
+        """
+        candidates = []
+        configured = self.settings.get("backend", BACKEND_URL)
+        if configured:
+            candidates.append(configured.rstrip("/"))
+        if BACKEND_URL:
+            candidates.append(BACKEND_URL.rstrip("/"))
+        candidates.extend([
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3010",
+            "http://127.0.0.1:3010",
+        ])
+
+        deduped = []
+        seen = set()
+        for url in candidates:
+            if not isinstance(url, str) or not url.strip():
+                continue
+            key = url.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(url.strip())
+        return deduped
 
     def _get_cache_key(self, tmdb_id, media_type, season=None, episode=None):
         if media_type == "movie":
@@ -142,7 +180,13 @@ class APIClient:
                 return {"files": cached["sources"], "subtitles": cached.get("subtitles", []), "from_cache": True}
         
         # Fetch from backend with retry logic
-        data = self._fetch_sources_with_retry(tmdb_id, media_type, season, episode)
+        data = self._fetch_sources_with_retry(
+            tmdb_id,
+            media_type,
+            season,
+            episode,
+            force_refresh=force_refresh,
+        )
         
         if data and data.get("files"):
             # Sort sources by provider reliability score
@@ -160,70 +204,121 @@ class APIClient:
         
         return data
 
-    def _fetch_sources_with_retry(self, tmdb_id, media_type, season=None, episode=None, max_retries=2):
+    def _fetch_sources_with_retry(
+        self,
+        tmdb_id,
+        media_type,
+        season=None,
+        episode=None,
+        max_retries=2,
+        force_refresh=False,
+    ):
         """Fetch sources from backend with retry and jitter."""
-        base = self.settings.get("backend", BACKEND_URL)
-        
-        if media_type == "movie":
-            url = f"{base}/movie/{tmdb_id}"
-        else:
-            url = f"{base}/tv/{tmdb_id}?s={season}&e={episode}"
+        backend_bases = self._candidate_backends()
+        correlation_id = self._new_correlation_id()
         
         last_error = None
         
         for attempt in range(max_retries + 1):
-            try:
-                # Add cache-busting for retries
-                request_url = url
-                if attempt > 0:
-                    separator = "&" if "?" in url else "?"
-                    request_url = f"{url}{separator}_retry={attempt}&_t={int(time.time())}"
-                    console.print(f"[dim]  Retry {attempt}/{max_retries}...[/dim]")
-                
-                resp = self.session.get(request_url, timeout=self.timeout)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data and (data.get("files") or isinstance(data, list)):
-                        # Normalize response format
-                        if isinstance(data, list):
-                            data = {"files": data, "subtitles": []}
-                        return data
-                    
-                    # Empty response - backend might need time, retry
-                    if attempt < max_retries:
-                        jitter = random.uniform(0.5, 1.5)
-                        time.sleep(1 * (attempt + 1) * jitter)
-                        continue
-                
-                elif resp.status_code in [429, 503, 504]:
-                    # Rate limited or server busy - wait and retry
-                    if attempt < max_retries:
-                        wait_time = 2 ** attempt + random.uniform(0, 1)
-                        console.print(f"[yellow]  Server busy, waiting {wait_time:.1f}s...[/yellow]")
-                        time.sleep(wait_time)
-                        continue
-                
-                else:
-                    last_error = f"HTTP {resp.status_code}"
-                    
-            except requests.exceptions.Timeout:
-                last_error = "Timeout"
-                if attempt < max_retries:
-                    time.sleep(1)
-                    continue
-            except requests.exceptions.ConnectionError:
-                last_error = "Connection error"
-                if attempt < max_retries:
-                    time.sleep(2)
-                    continue
-            except Exception as e:
-                last_error = str(e)
+            if attempt > 0:
+                console.print(f"[dim]  Retry {attempt}/{max_retries}...[/dim]")
+
+            for base in backend_bases:
+                try:
+                    if media_type == "movie":
+                        url = f"{base}/movie/{tmdb_id}"
+                    else:
+                        url = f"{base}/tv/{tmdb_id}?s={season}&e={episode}"
+
+                    request_headers = {
+                        "X-Client-Type": "cinema-cli",
+                        "X-Correlation-Id": correlation_id,
+                    }
+                    params = None
+                    if force_refresh:
+                        request_headers["X-Bypass-Cache"] = "1"
+                        params = {"force_refresh": "1"}
+
+                    # Add cache-busting for retries
+                    request_url = url
+                    if attempt > 0:
+                        separator = "&" if "?" in url else "?"
+                        request_url = f"{url}{separator}_retry={attempt}&_t={int(time.time())}"
+
+                    resp = self.session.get(
+                        request_url,
+                        timeout=self.timeout,
+                        headers=request_headers,
+                        params=params,
+                    )
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and (data.get("files") or isinstance(data, list)):
+                            # Normalize response format
+                            if isinstance(data, list):
+                                data = {
+                                    "files": data,
+                                    "subtitles": [],
+                                    "quality_groups": {},
+                                    "pipeline": {},
+                                }
+                            else:
+                                files = data.get("files")
+                                subtitles = data.get("subtitles")
+                                data = {
+                                    "files": files if isinstance(files, list) else ([files] if files else []),
+                                    "subtitles": subtitles if isinstance(subtitles, list) else [],
+                                    "quality_groups": data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {},
+                                    "pipeline": data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {},
+                                }
+                            # Persist the winning backend for the rest of this session
+                            self.settings["backend"] = base
+                            data["correlation_id"] = (
+                                resp.headers.get("x-correlation-id")
+                                or data.get("correlation_id")
+                                or correlation_id
+                            )
+                            data["backend_used"] = base
+                            log_event(
+                                "api",
+                                f"sources fetched ({media_type}:{tmdb_id}) files={len(data.get('files', []))}",
+                                correlation_id=data["correlation_id"],
+                            )
+                            return data
+
+                        # Empty response - backend might need time, retry
+                        if attempt < max_retries:
+                            jitter = random.uniform(0.5, 1.5)
+                            time.sleep(1 * (attempt + 1) * jitter)
+                            continue
+
+                    elif resp.status_code in [429, 503, 504]:
+                        # Rate limited or server busy - wait and retry
+                        if attempt < max_retries:
+                            wait_time = 2 ** attempt + random.uniform(0, 1)
+                            console.print(f"[yellow]  Server busy, waiting {wait_time:.1f}s...[/yellow]")
+                            time.sleep(wait_time)
+                            continue
+
+                    else:
+                        last_error = f"HTTP {resp.status_code}"
+
+                except requests.exceptions.Timeout:
+                    last_error = "Timeout"
+                except requests.exceptions.ConnectionError:
+                    last_error = "Connection error"
+                except Exception as e:
+                    last_error = str(e)
+
+            if attempt < max_retries:
+                # brief backoff before trying all backends again
+                time.sleep(1.0 + attempt)
         
         if last_error:
             console.print(f"[red]  Backend error: {last_error}[/red]")
         
-        return {}
+        return {"correlation_id": correlation_id}
 
     def _sort_sources_by_score(self, sources):
         """Sort sources by provider reliability score (highest first)."""
@@ -260,6 +355,17 @@ class APIClient:
         """
         all_sources = []
         seen_urls = set()
+        subtitle_map = {}
+
+        def _merge_subtitles(items):
+            if not isinstance(items, list):
+                return
+            for sub in items:
+                if not isinstance(sub, dict):
+                    continue
+                sub_url = sub.get("url")
+                if isinstance(sub_url, str) and sub_url and sub_url not in subtitle_map:
+                    subtitle_map[sub_url] = sub
         
         # First attempt - normal fetch
         data = self.get_sources_api(tmdb_id, media_type, season, episode)
@@ -269,6 +375,7 @@ class APIClient:
                 if url and url not in seen_urls:
                     all_sources.append(src)
                     seen_urls.add(url)
+        _merge_subtitles(data.get("subtitles") if data else [])
         
         # If we don't have enough sources, try fresh fetch
         if len(all_sources) < min_sources:
@@ -280,13 +387,14 @@ class APIClient:
                     if url and url not in seen_urls:
                         all_sources.append(src)
                         seen_urls.add(url)
+            _merge_subtitles(fresh_data.get("subtitles") if fresh_data else [])
         
         # Sort all sources by score
         all_sources = self._sort_sources_by_score(all_sources)
         
         return {
             "files": all_sources,
-            "subtitles": data.get("subtitles", []) if data else []
+            "subtitles": list(subtitle_map.values()),
         }
 
     def report_source_result(self, provider, success):

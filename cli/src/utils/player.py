@@ -18,6 +18,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ─── Supported Players ───────────────────────────────────────────────
 SUPPORTED_PLAYERS = ["mpv", "vlc", "iina"]  # iina for macOS users
 
+# In-memory probe cache to avoid probing the same URL repeatedly.
+_PROBE_CACHE = {}
+_PROBE_TTL_SECONDS = 180
+
 
 def detect_available_players():
     """Return list of players found on the system."""
@@ -99,6 +103,66 @@ def _norm_lang(lang: str) -> str:
     return l or "und"
 
 
+def _vtt_to_srt(vtt_text: str) -> str:
+    """Convert WebVTT subtitle text to SRT format for better player compatibility."""
+    import re as _re
+    lines = vtt_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    srt_blocks = []
+    cue_idx = 0
+    i = 0
+
+    # Skip BOM and WEBVTT header
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("WEBVTT"):
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                i += 1
+            break
+        if not stripped:
+            i += 1
+            continue
+        break
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if line.startswith("NOTE") or line.startswith("STYLE"):
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                i += 1
+            continue
+        if "-->" in line:
+            ts_line = _re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d{3})", r"\1,\2", line)
+            ts_line = _re.sub(r"(\d{2}:\d{2})\.(\d{3})", r"\1,\2", ts_line)
+            ts_line = _re.sub(r"(?<!\d)(\d{2}:\d{2},\d{3})", r"00:\1", ts_line)
+            ts_line = _re.sub(r"([\d:,]+\s*-->\s*[\d:,]+)\s+.*", r"\1", ts_line)
+            i += 1
+            text_lines = []
+            while i < len(lines) and lines[i].strip():
+                text_lines.append(lines[i].rstrip())
+                i += 1
+            if text_lines:
+                cue_idx += 1
+                srt_blocks.append(f"{cue_idx}\n{ts_line}\n" + "\n".join(text_lines))
+        else:
+            i += 1
+
+    return "\n\n".join(srt_blocks) + "\n" if srt_blocks else vtt_text
+
+
+def _looks_like_subtitle(data: bytes) -> bool:
+    """Validate that bytes look like actual subtitle content, not HTML/error."""
+    if not data or len(data) < 20:
+        return False
+    head = data[:2048].lower()
+    if b"<html" in head or b"<!doctype" in head:
+        return False
+    return (b"webvtt" in head) or (b" --> " in head) or (b"{\\an" in head)
+
+
 def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
                        include_all_subs, fallback_langs=None, preferred_langs=None):
     """Download / collect subtitle paths. Returns list of local file paths or URLs.
@@ -109,11 +173,17 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
     """
     sub_paths = []
 
+    # If subtitles are explicitly disabled, return empty immediately.
+    if preferred_sub_lang in ("none", ""):
+        return sub_paths
+
     # Build effective ordered language list
     primary = _norm_lang(preferred_sub_lang or "ar")
     if preferred_langs and isinstance(preferred_langs, (list, tuple)) and preferred_langs:
-        wanted = [_norm_lang(l) for l in preferred_langs if l]
-        if wanted[0] != primary:
+        wanted = [_norm_lang(l) for l in preferred_langs if l and _norm_lang(l) != "none"]
+        if not wanted:
+            wanted = [primary]
+        elif wanted[0] != primary:
             wanted = [primary] + [l for l in wanted if l != primary]
     else:
         wanted = [primary]
@@ -155,18 +225,39 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
             base = "".join(c for c in title if c.isalnum() or c in " _-").strip().replace(" ", "_")
             for s in ordered[:5]:
                 sub_url = s["url"]
-                sub_ext = "vtt" if ".vtt" in sub_url.lower() else ("srt" if ".srt" in sub_url.lower() else "srt")
-                local_sub = os.path.join(temp_dir, f"{base}.{s['lang']}.{sub_ext}")
+                # Always save as .srt for maximum player compatibility
+                local_sub = os.path.join(temp_dir, f"{base}.{s['lang']}.srt")
                 try:
                     r = requests.get(sub_url, timeout=15, headers=headers or {}, verify=False)
-                    if r.status_code == 200 and r.content and len(r.content) > 20:
-                        with open(local_sub, "wb") as f:
-                            f.write(r.content)
+                    if r.status_code == 200 and r.content and _looks_like_subtitle(r.content):
+                        # Decode with robust encoding detection
+                        decoded = None
+                        for enc in ["utf-8", "utf-8-sig", "cp1256", "windows-1256",
+                                    "iso-8859-6", "iso-8859-1", "cp1252",
+                                    "shift_jis", "euc-kr", "gb18030", "latin-1"]:
+                            try:
+                                decoded = r.content.decode(enc)
+                                break
+                            except (UnicodeDecodeError, LookupError):
+                                continue
+                        if decoded is None:
+                            decoded = r.content.decode("utf-8", errors="ignore")
+
+                        # Convert VTT to SRT if needed for better sync
+                        if decoded.lstrip().startswith("WEBVTT") or ".vtt" in sub_url.lower():
+                            decoded = _vtt_to_srt(decoded)
+
+                        with open(local_sub, "w", encoding="utf-8-sig") as f:
+                            f.write(decoded)
                         sub_paths.append(local_sub)
+                    elif r.status_code == 200:
+                        # Content didn't validate — skip this subtitle, don't pass raw URL
+                        pass
                     else:
-                        sub_paths.append(sub_url)
+                        # HTTP error — skip silently
+                        pass
                 except Exception:
-                    sub_paths.append(sub_url)
+                    pass  # Skip failed subtitle downloads silently
         except Exception:
             pass
 
@@ -186,7 +277,7 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
             if fallback_langs and isinstance(fallback_langs, (list, tuple)):
                 for x in fallback_langs:
                     c = str(x).strip().lower()
-                    if c and c not in langs:
+                    if c and c not in langs and c != "none":
                         langs.append(c)
             for last in ("ar", "en"):
                 if last not in langs:
@@ -213,10 +304,29 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
                 saved = []
                 for s in subs_found:
                     lang = _norm_lang(str(s.get("lang") or "und"))
-                    sub_ext = str(s.get("ext") or "srt")
+                    content = s.get("content") or b""
+                    # Validate content
+                    if not _looks_like_subtitle(content):
+                        continue
+                    # Decode and convert VTT→SRT if needed
+                    try:
+                        decoded = content.decode("utf-8", errors="ignore")
+                        if decoded.lstrip().startswith("WEBVTT"):
+                            decoded = _vtt_to_srt(decoded)
+                            sub_ext = "srt"
+                        else:
+                            sub_ext = str(s.get("ext") or "srt")
+                    except Exception:
+                        sub_ext = str(s.get("ext") or "srt")
+                        decoded = None
+
                     sub_path = os.path.join(temp_dir, f"{base}.{lang}.{sub_ext}")
-                    with open(sub_path, "wb") as f:
-                        f.write(s.get("content") or b"")
+                    if decoded:
+                        with open(sub_path, "w", encoding="utf-8-sig") as f:
+                            f.write(decoded)
+                    else:
+                        with open(sub_path, "wb") as f:
+                            f.write(content)
                     saved.append(sub_path)
                     if not include_all_subs:
                         break
@@ -243,8 +353,10 @@ def _quality_to_ytdl_format(quality):
             height = int(q)
         except ValueError:
             return None
-    # Prefer video stream with height <= desired; accept any audio; fall back to best
-    return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+    # Strict quality lock: do NOT fall back to global "best" when user selected
+    # a specific resolution. If unavailable, yt-dlp should fail and caller can
+    # switch source/quality explicitly.
+    return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
 
 
 def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None):
@@ -279,7 +391,6 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
         "--demuxer-max-bytes=256M",
         "--demuxer-max-back-bytes=128M",
         "--demuxer-readahead-secs=30",
-        "--hls-bitrate=max",
         "--cache-pause=yes",
         "--term-status-msg=STATUS: ${=time-pos} / ${=duration}",
     ]
@@ -289,12 +400,10 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
 
     if use_ytdl and shutil.which("yt-dlp"):
         args.insert(1, "--ytdl")
-        # Quality selection via yt-dlp: request a specific resolution when the user
-        # chose something other than "best".  mpv passes this to yt-dlp as a format
-        # selector so the HLS manifest variant is chosen before playback starts.
-        fmt = _quality_to_ytdl_format(quality)
-        if fmt:
-            args.append(f"--ytdl-format={fmt}")
+        # Always enforce a video+audio selector when using yt-dlp to avoid
+        # accidental audio-only HLS variant selection on some manifests.
+        fmt = _quality_to_ytdl_format(quality) or "bestvideo+bestaudio/best"
+        args.append(f"--ytdl-format={fmt}")
         if headers:
             header_list = []
             for k, v in headers.items():
@@ -338,6 +447,8 @@ def _run_mpv(args):
 
     position = 0
     duration = 0
+    had_video = False
+    no_video_explicit = False
 
     while True:
         line = process.stdout.readline()
@@ -354,12 +465,22 @@ def _run_mpv(args):
                         duration = d
             except Exception:
                 pass
+        low = line.lower()
+        if "video:" in low and "no video" not in low:
+            had_video = True
+        if "video: no video" in low or "no video streams selected" in low:
+            no_video_explicit = True
 
     process.wait()
     return {
         "position": position,
         "duration": duration,
         "finished": (duration > 0 and position > duration * 0.9),
+        "had_video": had_video,
+        # Only treat as no-video when mpv explicitly reports it.
+        # Do NOT infer from position/time alone; that caused false positives
+        # and endless fallback loops when users closed playback manually.
+        "no_video": no_video_explicit,
     }
 
 
@@ -406,6 +527,77 @@ def _run_vlc(args):
         "duration": elapsed,
         "finished": elapsed > 30,  # VLC doesn't expose easy position tracking
     }
+
+
+def _ffprobe_has_video(url, headers=None, timeout_sec=12):
+    """Return (ok, reason) for whether ffprobe sees a video stream on URL.
+
+    This runs before opening MPV to reject broken/audio-only HLS URLs early.
+    """
+    ffprobe_exe = shutil.which("ffprobe")
+    if not ffprobe_exe:
+        return True, "ffprobe_unavailable"
+
+    cache_key = f"{url}|{(headers or {}).get('Referer','')}|{(headers or {}).get('Origin','')}"
+    now = time.time()
+    cached = _PROBE_CACHE.get(cache_key)
+    if cached and (now - cached["ts"] < _PROBE_TTL_SECONDS):
+        return cached["ok"], cached["reason"]
+
+    cmd = [
+        ffprobe_exe,
+        "-v", "error",
+        "-show_entries", "stream=codec_type",
+        "-select_streams", "v:0",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+    ]
+
+    if headers and isinstance(headers, dict):
+        # ffmpeg/ffprobe expects CRLF-separated header lines.
+        header_lines = []
+        for k, v in headers.items():
+            if v is None:
+                continue
+            header_lines.append(f"{k}: {v}")
+        if header_lines:
+            cmd.extend(["-headers", "\r\n".join(header_lines) + "\r\n"])
+        ua = headers.get("User-Agent") or headers.get("user-agent")
+        if ua:
+            cmd.extend(["-user_agent", str(ua)])
+
+    cmd.append(url)
+
+    run_kw = {
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "ignore",
+        "timeout": timeout_sec,
+    }
+    if os.name == "nt":
+        run_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    try:
+        res = subprocess.run(cmd, **run_kw)
+        out = (res.stdout or "").strip().lower()
+        # Only hard-reject when ffprobe completed successfully and found no
+        # video stream. Any transport/auth/network failure is treated as
+        # inconclusive so playback can still proceed and be judged by mpv.
+        if res.returncode == 0:
+            ok = "video" in out
+            reason = "ok" if ok else "no_video_stream_detected"
+        else:
+            ok = True
+            reason = "probe_inconclusive"
+    except subprocess.TimeoutExpired:
+        ok = True
+        reason = "probe_timeout_inconclusive"
+    except Exception as exc:
+        ok = True
+        reason = f"probe_inconclusive:{exc}"[:160]
+
+    _PROBE_CACHE[cache_key] = {"ok": ok, "reason": reason, "ts": now}
+    return ok, reason
 
 
 # ─── Main play functions ─────────────────────────────────────────────
@@ -470,21 +662,73 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
             time.sleep(2)
             return None
 
-    # ── MPV path (with retry logic to fix instant-close) ──
+    # ── Pre-play probe: reject URLs that have no video stream before opening MPV ──
+    probe_ok, probe_reason = _ffprobe_has_video(url, headers=headers)
+    if not probe_ok:
+        console.print(f"[{WARNING}]Source rejected before playback (no video): {probe_reason}[/{WARNING}]")
+        return {
+            "position": 0,
+            "duration": 0,
+            "finished": False,
+            "had_video": False,
+            "no_video": True,
+            "probe_failed": True,
+        }
+
+    # ── MPV path (prefer yt-dlp for HLS/quality-enforced streams) ──
     try:
-        # Attempt 1: direct mpv without yt-dlp (most reliable for direct stream URLs).
-        # Quality selection via --ytdl-format only applies when yt-dlp is active,
-        # so pass quality=None for the direct attempt; it is applied in the retry.
-        mpv_args = _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False)
-        console.print(f"[dim]Launching mpv (direct mode)...[/dim]")
+        url_l = (url or "").lower()
+        looks_like_manifest = any(sig in url_l for sig in [
+            ".m3u8", "m3u8", "master", "playlist", "/hls/", "index.m3u8"
+        ])
+        quality_enforced = bool(quality and quality not in ("auto", "adaptive", "best"))
+        prefer_ytdl = bool(shutil.which("yt-dlp")) and (
+            looks_like_manifest or quality_enforced or bool(headers)
+        )
+
+        mpv_args = _build_mpv_args(
+            url,
+            title,
+            headers,
+            sub_paths,
+            preferred_sub_lang,
+            start_time,
+            use_ytdl=prefer_ytdl,
+            quality=quality if prefer_ytdl else None,
+        )
+        console.print(f"[dim]Launching mpv ({'yt-dlp' if prefer_ytdl else 'direct'} mode)...[/dim]")
         stats = _run_mpv(mpv_args)
 
-        # If mpv closed instantly (played < 3 sec, no duration detected), try with yt-dlp.
-        # Pass the user's quality preference so the correct HLS variant is selected.
-        if stats["duration"] == 0 and stats["position"] == 0 and shutil.which("yt-dlp"):
-            console.print(f"[{WARNING}]Direct playback failed, retrying with yt-dlp...[/{WARNING}]")
-            mpv_args = _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=True, quality=quality)
-            stats = _run_mpv(mpv_args)
+        # If first mode failed instantly, retry once with the alternate mode.
+        if stats["duration"] == 0 and stats["position"] == 0:
+            if prefer_ytdl and quality_enforced:
+                console.print(
+                    f"[{WARNING}]Quality-locked playback failed for this source; trying another source/quality.[/{WARNING}]"
+                )
+                return {
+                    "position": 0,
+                    "duration": 0,
+                    "finished": False,
+                    "had_video": False,
+                    "no_video": True,
+                }
+
+            alt_use_ytdl = (not prefer_ytdl) and bool(shutil.which("yt-dlp"))
+            if alt_use_ytdl or prefer_ytdl:
+                console.print(
+                    f"[{WARNING}]Primary playback mode failed, retrying with {'yt-dlp' if alt_use_ytdl else 'direct'}...[/{WARNING}]"
+                )
+                mpv_args = _build_mpv_args(
+                    url,
+                    title,
+                    headers,
+                    sub_paths,
+                    preferred_sub_lang,
+                    start_time,
+                    use_ytdl=alt_use_ytdl,
+                    quality=quality if alt_use_ytdl else None,
+                )
+                stats = _run_mpv(mpv_args)
 
         # If still nothing and VLC is available, offer VLC fallback
         if stats["duration"] == 0 and stats["position"] == 0:

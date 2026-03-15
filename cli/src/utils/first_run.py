@@ -256,7 +256,7 @@ def _step_theme() -> str:
     _print("  Available themes:")
     for i, t in enumerate(themes, 1):
         _print(f"    [dim]{i}.[/dim] {t.capitalize()}")
-    _print()
+    _print("")
 
     choice = _input("  Enter theme number or name (default: cinema): ").strip().lower()
     selected = "cinema"
