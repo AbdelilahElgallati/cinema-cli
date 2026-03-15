@@ -182,8 +182,5 @@ If you find a security issue, please see [`SECURITY.md`](SECURITY.md).
 
 ## License
 MIT — see [`LICENSE`](LICENSE).
+
 ---
-
-## 📄 License
-
-See `LICENSE` in the repository root.
