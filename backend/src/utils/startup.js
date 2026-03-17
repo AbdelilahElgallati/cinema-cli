@@ -30,7 +30,7 @@ export function startup() {
       const url = new URL(process.env.BACKEND_URL);
       process.env.PORT = url.port || (url.protocol === 'https:' ? '443' : '80');
     } catch (_) {
-      process.env.PORT = '3000';
+      process.env.PORT = '3010';
     }
   }
 }

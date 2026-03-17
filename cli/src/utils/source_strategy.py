@@ -3,6 +3,14 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 
+_FALLBACK_QUALITY_OPTIONS = [
+    {"name": "📺 1080p", "value": "1080p"},
+    {"name": "📺 720p", "value": "720p"},
+    {"name": "📺 480p", "value": "480p"},
+    {"name": "📺 360p", "value": "360p"},
+]
+
+
 def quality_sort_key(quality: str) -> int:
     q = (quality or "").lower()
     if "4k" in q or "2160" in q:
@@ -26,6 +34,23 @@ def sort_manifest_qualities(files: List[Dict[str, Any]]) -> List[str]:
             qualities.append(q)
     qualities.sort(key=quality_sort_key)
     return qualities
+
+
+def build_quality_menu_options(
+    files: List[Dict[str, Any]], include_adaptive: bool = False
+) -> List[Dict[str, str]]:
+    qualities = [q for q in sort_manifest_qualities(files) if (q or "").lower() != "unknown"]
+
+    options: List[Dict[str, str]] = [{"name": "✨ Best Available (Auto)", "value": "auto"}]
+    if include_adaptive:
+        options.append({"name": "🔄 Adaptive (match connection speed)", "value": "adaptive"})
+
+    if qualities:
+        options.extend([{"name": f"📺 {q}", "value": q} for q in qualities])
+        return options
+
+    options.extend(_FALLBACK_QUALITY_OPTIONS)
+    return options
 
 
 def filter_sources_for_quality(

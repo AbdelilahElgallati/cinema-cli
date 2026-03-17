@@ -62,7 +62,7 @@ This can be useful for:
 2. Install the dependencies with `npm install`
 3. Check the `.env.example` file and create a `.env` file with the same structure
 4. Start the server with `npm start`
-5. The server should now be running on `http://localhost:3000`
+5. The server should now be running on `http://localhost:3010`
 
 ## License
 

@@ -72,6 +72,113 @@ function sourceIdFor(file, provider) {
     .slice(0, 16);
 }
 
+function absolutizeUrl(baseUrl, maybeRelative) {
+  try {
+    return new URL(maybeRelative, baseUrl).toString();
+  } catch {
+    return maybeRelative;
+  }
+}
+
+function qualityFromStreamInf(attrsLine = '') {
+  const line = String(attrsLine || '');
+
+  const resolutionMatch = line.match(/RESOLUTION\s*=\s*(\d+)x(\d+)/i);
+  if (resolutionMatch) {
+    return normalizeQuality(`${resolutionMatch[2]}p`);
+  }
+
+  const nameMatch = line.match(/NAME\s*=\s*"([^"]+)"/i);
+  if (nameMatch) {
+    return normalizeQuality(nameMatch[1]);
+  }
+
+  const bandwidthMatch = line.match(/BANDWIDTH\s*=\s*(\d+)/i);
+  if (bandwidthMatch) {
+    const bandwidth = Number(bandwidthMatch[1]);
+    if (bandwidth >= 12000000) return '2160p';
+    if (bandwidth >= 5000000) return '1080p';
+    if (bandwidth >= 2500000) return '720p';
+    if (bandwidth >= 1200000) return '480p';
+    if (bandwidth >= 500000) return '360p';
+  }
+
+  return 'unknown';
+}
+
+async function expandHlsVariants(source) {
+  if (!source || source.type !== 'hls' || source.quality !== 'unknown') {
+    return [source];
+  }
+
+  try {
+    const mergedHeaders = {
+      'User-Agent': 'cinema-cli-backend/1.0',
+      ...(source.headers || {}),
+    };
+
+    const res = await fetch(source.file, {
+      method: 'GET',
+      headers: mergedHeaders,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(4500),
+    });
+
+    if (!res.ok) return [source];
+
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const body = await res.text();
+    const text = String(body || '');
+    const looksLikeM3u8 = contentType.includes('mpegurl') || text.includes('#EXTM3U');
+    const isMasterPlaylist = text.includes('#EXT-X-STREAM-INF');
+
+    if (!looksLikeM3u8 || !isMasterPlaylist) {
+      return [source];
+    }
+
+    const lines = text.split(/\r?\n/);
+    const variants = [];
+
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = String(lines[i] || '').trim();
+      if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+
+      let variantUrl = '';
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const candidate = String(lines[j] || '').trim();
+        if (!candidate || candidate.startsWith('#')) continue;
+        variantUrl = candidate;
+        break;
+      }
+
+      if (!variantUrl) continue;
+
+      const quality = qualityFromStreamInf(line);
+      const absoluteUrl = absolutizeUrl(source.file, variantUrl);
+      variants.push({
+        ...source,
+        file: absoluteUrl,
+        quality,
+        source_id: sourceIdFor(absoluteUrl, source.provider),
+        parent_source_id: source.source_id,
+      });
+    }
+
+    const usefulVariants = variants.filter((variant) => variant.quality !== 'unknown');
+    if (usefulVariants.length > 0) {
+      // Keep the original master source as a fallback. Some hosts require
+      // tokens/query semantics that work only when the player starts from master.
+      return [source, ...usefulVariants];
+    }
+    if (variants.length > 0) {
+      return [source, ...variants];
+    }
+    return [source];
+  } catch {
+    return [source];
+  }
+}
+
 async function httpProbe(url, headers) {
   const merged = {
     'User-Agent': 'cinema-cli-backend/1.0',
@@ -217,11 +324,18 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
   stageDurations.collect_ms = Date.now() - tCollectStart;
 
   const tNormalizeStart = Date.now();
+  const expandedSources = [];
+  for (const s of normalizedSources) {
+    const expanded = await expandHlsVariants(s);
+    expandedSources.push(...expanded);
+  }
+
   const deduped = [];
   const seen = new Set();
-  for (const s of normalizedSources) {
-    if (seen.has(s.file)) continue;
-    seen.add(s.file);
+  for (const s of expandedSources) {
+    const dedupeKey = `${s.file}|${s.quality}|${s.provider}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
     deduped.push(s);
   }
 

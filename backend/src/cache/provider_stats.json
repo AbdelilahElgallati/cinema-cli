@@ -6,17 +6,22 @@
       "timeout": 0
     },
     "getTwoEmbed": {
-      "success": 12,
+      "success": 67,
       "no_video": 0,
       "timeout": 0
     },
     "getVidrock": {
-      "success": 9,
-      "no_video": 0,
+      "success": 99,
+      "no_video": 27,
       "timeout": 0
     },
     "getVidSrc": {
-      "success": 5,
+      "success": 16,
+      "no_video": 0,
+      "timeout": 0
+    },
+    "getMultiembed": {
+      "success": 17,
       "no_video": 0,
       "timeout": 0
     }

@@ -25,7 +25,7 @@ info:
     url: https://github.com/cinepro-org/backend/graphs/contributors
 
 servers:
-  - url: http://localhost:3000
+  - url: http://localhost:3010
     description: Local development server
 
 paths:

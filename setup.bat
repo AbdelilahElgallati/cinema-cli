@@ -108,7 +108,7 @@ if not exist "%~dp0.env" (
         echo  [OK] .env created from .env_example  — edit it to add your API keys.
     ) else (
         echo  TMDB_API_KEY=> "%~dp0.env"
-        echo  BACKEND_URL=http://localhost:3000>> "%~dp0.env"
+        echo  BACKEND_URL=http://localhost:3010>> "%~dp0.env"
         echo  OPENSUBTITLES_API_KEY=>> "%~dp0.env"
         echo  [OK] .env stub created  — add your TMDB_API_KEY.
     )

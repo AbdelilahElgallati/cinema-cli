@@ -281,7 +281,7 @@ def _write_settings(download_dir: str, theme: str):
         except Exception:
             pass
 
-    existing.setdefault("backend", os.getenv("BACKEND_URL", "http://localhost:3000"))
+    existing.setdefault("backend", os.getenv("BACKEND_URL", "http://localhost:3010"))
     existing["library_dir"]   = download_dir
     existing["theme"]          = theme
     if not existing.get("preferred_subtitle"):

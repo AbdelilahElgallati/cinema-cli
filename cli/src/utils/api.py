@@ -73,7 +73,7 @@ class APIClient:
         Order:
         1) User-configured backend from settings
         2) Environment/default BACKEND_URL
-        3) Local fallbacks commonly used by this project (3000/3010)
+        3) Local fallback commonly used by this project (3010)
         """
         candidates = []
         configured = self.settings.get("backend", BACKEND_URL)
@@ -82,8 +82,6 @@ class APIClient:
         if BACKEND_URL:
             candidates.append(BACKEND_URL.rstrip("/"))
         candidates.extend([
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
             "http://localhost:3010",
             "http://127.0.0.1:3010",
         ])

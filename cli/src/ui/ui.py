@@ -274,14 +274,22 @@ def format_item(item):
 _HELP_BROWSE = "  ↑↓ Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
 _HELP_SELECT = "  ↑↓ Navigate   Enter Confirm   B/Q Cancel  "
 _HELP_MULTI  = "  ↑↓ Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
+_HELP_BROWSE_JUMP = "  ↑↓ Navigate   Enter Select   J Jump   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
 
 
 # ─── Selection menu ────────────────────────────────────────────────────────────
 
-def selection_menu(items, title, show_details=True, formatter=None, default_index=0):
+def selection_menu(
+    items,
+    title,
+    show_details=True,
+    formatter=None,
+    default_index=0,
+    allow_jump=False,
+):
     """Interactive arrow-key selection menu.
 
-    Returns {"action": "select"|"back"|"quit"|"favorite"|"batch", "value": item}.
+    Returns {"action": "select"|"back"|"quit"|"favorite"|"batch"|"jump", "value": item}.
     """
     if not items:
         return None
@@ -338,6 +346,13 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
         result["action"] = "batch"
         event.app.exit()
 
+    @kb.add("j")
+    def _jump(event):
+        if allow_jump:
+            result["action"] = "jump"
+            result["value"] = items[selected_index]
+            event.app.exit()
+
     @kb.add("g")
     def _top(event):
         nonlocal selected_index
@@ -374,7 +389,7 @@ def selection_menu(items, title, show_details=True, formatter=None, default_inde
             res.append(("class:dim", f"  ↓ {remaining} more below\n"))
 
         res.append(("class:border", "\n" + "─" * 66 + "\n"))
-        res.append(("class:help", _HELP_BROWSE))
+        res.append(("class:help", _HELP_BROWSE_JUMP if allow_jump else _HELP_BROWSE))
         return res
 
     def get_details_text():

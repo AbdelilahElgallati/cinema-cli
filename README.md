@@ -112,7 +112,7 @@ Inside **mpv**, use standard controls (`space` = pause, `s` = subtitles, etc.).
 ## ❓ FAQ
 
 **Why is a backend needed?**
-A small Node.js proxy fetches streaming links from public sources. It runs automatically on launch at `localhost:3000`.
+A small Node.js proxy fetches streaming links from public sources. It runs automatically on launch at `localhost:3010`.
 
 **Will it work without a TMDB key?**
 No. TMDB provides metadata (titles, posters, ratings, episodes).
@@ -157,6 +157,7 @@ cinema-cli/
 python main.py --version
 python main.py --help
 python main.py --setup
+python main.py --smoke
 ```
 
 ---

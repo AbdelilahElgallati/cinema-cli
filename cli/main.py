@@ -191,6 +191,7 @@ from src.utils.download_manager import DownloadManager
 from src.utils.player import play_stream, play_video, detect_available_players
 from src.utils.source_strategy import (
     adaptive_quality_from_speed,
+    build_quality_menu_options,
     filter_sources_for_quality,
     sort_manifest_qualities,
 )
@@ -373,6 +374,197 @@ def run_debug_subtitle_command(argv):
     return 0
 
 
+def run_smoke_command(argv):
+    """Run a tiny end-to-end smoke check for source selection flows.
+
+    It validates both stream and download source selection logic for:
+    - one movie
+    - one TV episode
+    """
+    settings = load_json_data(SETTINGS_FILE) or {"backend": BACKEND_URL}
+    api = APIClient(settings)
+    # Keep smoke runs short even when backend/network is unavailable.
+    api.timeout = (3, 5)
+
+    movie_id = _arg_value(argv, "--movie-id")
+    tv_id = _arg_value(argv, "--tv-id")
+    season_arg = _arg_value(argv, "--season")
+    episode_arg = _arg_value(argv, "--episode")
+    timeout_arg = _arg_value(argv, "--timeout")
+    skip_validation = "--skip-validation" in argv
+
+    try:
+        per_source_timeout = int(timeout_arg) if timeout_arg else 2
+    except ValueError:
+        console.print("[red]--timeout must be an integer (seconds)[/red]")
+        return 2
+    per_source_timeout = max(1, min(per_source_timeout, 8))
+
+    # Stable defaults avoid extra TMDB metadata calls in smoke runs.
+    if not movie_id:
+        movie_id = "550"  # Fight Club
+    if not tv_id:
+        tv_id = "1396"  # Breaking Bad
+        auto_season, auto_episode = 1, 1
+    else:
+        auto_season, auto_episode = None, None
+
+    try:
+        season = int(season_arg) if season_arg else int(auto_season) if auto_season else 1
+        episode = int(episode_arg) if episode_arg else int(auto_episode) if auto_episode else 1
+    except ValueError:
+        console.print("[red]--season and --episode must be integers[/red]")
+        return 2
+
+    if not movie_id or not tv_id:
+        console.print("[red]Smoke test could not resolve default movie/tv IDs. Pass --movie-id and --tv-id manually.[/red]")
+        return 2
+
+    def _check_case(label, tmdb_id, media_type, season_num=None, episode_num=None):
+        data = api._fetch_sources_with_retry(
+            tmdb_id,
+            media_type,
+            season_num,
+            episode_num,
+            max_retries=0,
+            force_refresh=False,
+        )
+        files = data.get("files", []) if isinstance(data, dict) else []
+        quality_groups = data.get("quality_groups", {}) if isinstance(data, dict) else {}
+
+        if not files:
+            return {
+                "label": label,
+                "stream_ok": False,
+                "download_ok": False,
+                "details": "No sources returned",
+            }
+
+        available_qualities = sort_manifest_qualities(files)
+        requested_quality = available_qualities[0] if available_qualities else "auto"
+        filtered_files, mode = filter_sources_for_quality(files, requested_quality)
+        candidate_files = filtered_files if filtered_files else files
+
+        stream_candidates = select_multiple_working_sources(
+            candidate_files,
+            count=2,
+            skip_validation=skip_validation,
+            max_parallel=2,
+            timeout_per_source=per_source_timeout,
+        )
+        stream_ok = bool(stream_candidates)
+
+        download_candidate = select_working_source(
+            candidate_files,
+            skip_validation=skip_validation,
+            max_parallel=2,
+            timeout_per_source=per_source_timeout,
+        )
+        download_ok = bool(download_candidate)
+
+        details = (
+            f"sources={len(files)} | quality={requested_quality} | mode={mode} | "
+            f"groups={len(quality_groups or {})} | skip_validation={skip_validation}"
+        )
+        return {
+            "label": label,
+            "stream_ok": stream_ok,
+            "download_ok": download_ok,
+            "details": details,
+        }
+
+    console.print("[bold {0}]Running smoke test for stream/download selection...[/bold {0}]".format(ACCENT))
+    movie_result = _check_case("Movie", str(movie_id), "movie")
+    tv_result = _check_case("TV", str(tv_id), "tv", season, episode)
+
+    table = Table(title="Selection Flow Smoke Test", box=box.SIMPLE)
+    table.add_column("Case")
+    table.add_column("Stream")
+    table.add_column("Download")
+    table.add_column("Details")
+
+    def _mark(ok):
+        return f"[{SUCCESS}]PASS[/{SUCCESS}]" if ok else "[red]FAIL[/red]"
+
+    table.add_row(
+        f"Movie (tmdb={movie_id})",
+        _mark(movie_result["stream_ok"]),
+        _mark(movie_result["download_ok"]),
+        movie_result["details"],
+    )
+    table.add_row(
+        f"TV (tmdb={tv_id} s={season} e={episode})",
+        _mark(tv_result["stream_ok"]),
+        _mark(tv_result["download_ok"]),
+        tv_result["details"],
+    )
+    console.print(table)
+
+    all_ok = (
+        movie_result["stream_ok"]
+        and movie_result["download_ok"]
+        and tv_result["stream_ok"]
+        and tv_result["download_ok"]
+    )
+    return 0 if all_ok else 1
+
+
+def build_subtitle_menu_options(
+    preferred_sub_lang,
+    pref_langs,
+    available_codes=None,
+    fallback_langs=None,
+):
+    available_codes = available_codes or []
+    fallback_langs = fallback_langs or []
+    lang_names = {
+        "ar": "Arabic", "en": "English", "fr": "French", "es": "Spanish",
+        "de": "German", "tr": "Turkish", "pt": "Portuguese", "it": "Italian",
+        "zh": "Chinese", "ja": "Japanese", "ko": "Korean", "hi": "Hindi",
+        "und": "Unknown",
+    }
+
+    def label(code):
+        return lang_names.get(code, code)
+
+    def normalize_codes(codes):
+        normalized = []
+        seen = set()
+        for code in codes:
+            code_str = str(code or "").strip().lower()
+            if not code_str or code_str == "none" or code_str in seen:
+                continue
+            seen.add(code_str)
+            normalized.append(code_str)
+        return normalized
+
+    pref_langs = normalize_codes(pref_langs)
+    fallback_langs = normalize_codes(fallback_langs)
+    available_codes = normalize_codes(available_codes)
+    configured_codes = normalize_codes(pref_langs + fallback_langs)
+    all_codes = available_codes or configured_codes
+
+    pref_label = ", ".join(label(lang) for lang in pref_langs[:3])
+    if len(pref_langs) > 3:
+        pref_label += f" +{len(pref_langs)-3}"
+    if not pref_label:
+        pref_label = label(preferred_sub_lang)
+
+    options = [
+        {"name": f"🌐 All Preferred ({pref_label})", "value": "preferred"},
+        {"name": f"📝 Primary only ({label(preferred_sub_lang)})", "value": "primary"},
+    ]
+
+    if all_codes:
+        all_label = "🗂 All Available" if available_codes else "🗂 All Available (from settings)"
+        options.insert(1, {"name": all_label, "value": "all"})
+        for code in all_codes:
+            options.append({"name": f"📝 {label(code)}", "value": code})
+
+    options.append({"name": "🚫 No subtitles", "value": "none"})
+    return options, all_codes
+
+
 def _auto_update_ytdlp():
     """Run yt-dlp -U in a background thread so startup is never blocked."""
     def _update():
@@ -483,6 +675,7 @@ class CinemaCLI:
         self.favorites   = load_json_data(FAVORITES_FILE)   or []
         self.playback    = load_json_data(PLAYBACK_FILE)     or {}
         self.watch_later = load_json_data(WATCH_LATER_FILE) or []
+        self.episode_positions = {}
 
         os.makedirs(self.settings["library_dir"], exist_ok=True)
         self.download_manager = DownloadManager(downloads_dir=self.settings["library_dir"], api_client=self.api, settings=self.settings)
@@ -519,8 +712,6 @@ class CinemaCLI:
         candidates = [
             str(backend_url).rstrip("/"),
             str(BACKEND_URL).rstrip("/"),
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
             "http://localhost:3010",
             "http://127.0.0.1:3010",
         ]
@@ -1633,15 +1824,20 @@ class CinemaCLI:
         if not data:
             return
         episodes = data.get("episodes", [])
+        season_key = f"{media.get('id')}_s{s_num}"
 
         def fmt_ep(x):
             name = x.get("name", "Unknown")
+            ep_no = x.get("episode_number")
+            ep_label = f"E{int(ep_no):02d}" if isinstance(ep_no, int) else "E?"
             air = x.get("air_date") or "N/A"
             year = air[:4] if isinstance(air, str) and len(air) >= 4 else "N/A"
             rating = x.get("vote_average", 0)
-            return f"{name} ({year}) | ⭐ {rating:.1f} | TV"
+            return f"{ep_label} - {name} ({year}) | ⭐ {rating:.1f} | TV"
 
-        selected_idx = 0
+        selected_idx = self.episode_positions.get(season_key, 0)
+        if selected_idx < 0 or selected_idx >= len(episodes):
+            selected_idx = 0
         while True:
             sel = selection_menu(
                 episodes,
@@ -1649,9 +1845,32 @@ class CinemaCLI:
                 show_details=True,
                 formatter=fmt_ep,
                 default_index=selected_idx,
+                allow_jump=True,
             )
             if not sel or sel["action"] == "back":
                 break
+
+            if sel["action"] == "jump":
+                jump_val = console.input(
+                    f"[bold {ACCENT}]Jump to episode number: [/bold {ACCENT}]"
+                ).strip()
+                try:
+                    target_ep_num = int(jump_val)
+                except ValueError:
+                    console.print("[yellow]Invalid number.[/yellow]")
+                    time.sleep(0.8)
+                    continue
+                found_idx = next(
+                    (i for i, e in enumerate(episodes) if e.get("episode_number") == target_ep_num),
+                    None,
+                )
+                if found_idx is None:
+                    console.print(f"[yellow]Episode {target_ep_num} not found in this season.[/yellow]")
+                    time.sleep(0.8)
+                    continue
+                selected_idx = found_idx
+                self.episode_positions[season_key] = selected_idx
+                continue
 
             if sel["action"] == "batch":
                 self.handle_batch_download(media, season, episodes)
@@ -1667,6 +1886,7 @@ class CinemaCLI:
             if sel["action"] == "select":
                 ep = sel["value"]
                 selected_idx = episodes.index(ep)
+                self.episode_positions[season_key] = selected_idx
                 next_step_auto = False
 
                 while True:
@@ -1706,6 +1926,7 @@ class CinemaCLI:
                             
                             if self.autoplay_countdown(next_title):
                                 selected_idx += 1
+                                self.episode_positions[season_key] = selected_idx
                                 ep = next_ep
                                 next_step_auto = True
                                 continue # Start next episode
@@ -1733,6 +1954,7 @@ class CinemaCLI:
                     if choice == "Next Episode":
                         if selected_idx + 1 < len(episodes):
                             selected_idx += 1
+                            self.episode_positions[season_key] = selected_idx
                             ep = episodes[selected_idx]
                         else:
                             console.print(
@@ -1743,6 +1965,7 @@ class CinemaCLI:
                     elif choice == "Previous Episode":
                         if selected_idx > 0:
                             selected_idx -= 1
+                            self.episode_positions[season_key] = selected_idx
                             ep = episodes[selected_idx]
                         else:
                             console.print("[yellow]No previous episode.[/yellow]")
@@ -1776,10 +1999,13 @@ class CinemaCLI:
         selected_quality = "auto"
         preferred_sub_lang = self.settings.get("preferred_subtitle", "ar")
         pref_langs = self.settings.get("preferred_subtitle_langs", [preferred_sub_lang])
+        fallback_langs = self.settings.get("fallback_subtitle_langs", ["ar", "en"])
         if not isinstance(pref_langs, list) or not pref_langs:
             pref_langs = [preferred_sub_lang]
         if pref_langs[0] != preferred_sub_lang:
             pref_langs = [preferred_sub_lang] + [l for l in pref_langs if l != preferred_sub_lang]
+        if not isinstance(fallback_langs, list):
+            fallback_langs = ["ar", "en"]
         include_all_subs = len(pref_langs) > 1
 
         try:
@@ -1789,40 +2015,8 @@ class CinemaCLI:
             first_files = first_data.get("files", []) if isinstance(first_data, dict) else []
             first_subs = first_data.get("subtitles", []) if isinstance(first_data, dict) else []
 
-            # Quality selection
-            # Providers return HLS adaptive streams; resolution is inside the manifest.
-            # Always offer standard resolution options; fold in any provider-tagged
-            # qualities if they happen to be present.
-            manifest_qualities = []
-            for f in first_files:
-                q = f.get("quality")
-                if q and q not in manifest_qualities:
-                    manifest_qualities.append(q)
-
-            def quality_sort_key(q):
-                q = (q or "").lower()
-                if "4k" in q or "2160" in q: return 0
-                if "1080" in q: return 1
-                if "720" in q: return 2
-                if "480" in q: return 3
-                if "360" in q: return 4
-                return 5
-
-            manifest_qualities.sort(key=quality_sort_key)
-
-            std_q_options = [
-                {"name": "✨ Best Available (Auto)", "value": "auto"},
-                {"name": "📺 4K (2160p)", "value": "4k"},
-                {"name": "📺 1080p", "value": "1080p"},
-                {"name": "📺 720p", "value": "720p"},
-                {"name": "📺 480p", "value": "480p"},
-                {"name": "📺 360p", "value": "360p"},
-            ]
-            for q in manifest_qualities:
-                tag = q.lower().replace(" ", "")
-                already = any(tag in opt["value"] for opt in std_q_options)
-                if not already:
-                    std_q_options.append({"name": f"📺 {q} (provider)", "value": q})
+            # Quality selection: show only qualities actually exposed by this episode.
+            std_q_options = build_quality_menu_options(first_files)
 
             q_sel = selection_menu(
                 std_q_options,
@@ -1834,70 +2028,55 @@ class CinemaCLI:
                 selected_quality = q_sel["value"]["value"]
 
             # Subtitle language selection
-            if first_subs:
-                def _norm_lang(l):
-                    l = (l or "").strip().lower()
-                    if l in ["arabic","ara","ar"]:          return "ar"
-                    if l in ["english","eng","en"]:         return "en"
-                    if l in ["french","fra","fre","fr"]:    return "fr"
-                    if l in ["spanish","spa","es"]:         return "es"
-                    if l in ["german","deu","ger","de"]:    return "de"
-                    if l in ["turkish","tur","tr"]:         return "tr"
-                    if l in ["portuguese","por","pt"]:      return "pt"
-                    if l in ["italian","ita","it"]:         return "it"
-                    return l or "und"
+            def _norm_lang(l):
+                l = (l or "").strip().lower()
+                if l in ["arabic","ara","ar"]:          return "ar"
+                if l in ["english","eng","en"]:         return "en"
+                if l in ["french","fra","fre","fr"]:    return "fr"
+                if l in ["spanish","spa","es"]:         return "es"
+                if l in ["german","deu","ger","de"]:    return "de"
+                if l in ["turkish","tur","tr"]:         return "tr"
+                if l in ["portuguese","por","pt"]:      return "pt"
+                if l in ["italian","ita","it"]:         return "it"
+                return l or "und"
 
-                avail_codes = []
-                for s in first_subs:
-                    if isinstance(s, dict):
-                        code = _norm_lang(s.get("lang") or s.get("language"))
-                        if code not in avail_codes:
-                            avail_codes.append(code)
+            avail_codes = []
+            for s in first_subs:
+                if isinstance(s, dict):
+                    code = _norm_lang(s.get("lang") or s.get("language"))
+                    if code not in avail_codes:
+                        avail_codes.append(code)
 
-                _lnames = {
-                    "ar": "Arabic", "en": "English", "fr": "French", "es": "Spanish",
-                    "de": "German", "tr": "Turkish", "pt": "Portuguese", "it": "Italian",
-                    "und": "Unknown",
-                }
-                def _lang_label(c): return _lnames.get(c, c)
-
-                pref_label = ", ".join(_lang_label(l) for l in pref_langs[:3])
-                if len(pref_langs) > 3:
-                    pref_label += f" +{len(pref_langs)-3}"
-
-                lang_opts = [
-                    {"name": f"🌐 All Preferred ({pref_label})", "value": "preferred"},
-                    {"name": "🗂 All Available (embed every track)", "value": "all"},
-                    {"name": f"📝 Primary only ({_lang_label(preferred_sub_lang)})", "value": "primary"},
-                ]
-                for code in avail_codes:
-                    lang_opts.append({"name": f"📝 {_lang_label(code)}", "value": code})
-                lang_opts.append({"name": "🚫 No subtitles", "value": "none"})
-
-                lang_sel = selection_menu(
-                    lang_opts,
-                    "Batch Download - Select Subtitle Languages",
-                    show_details=False,
-                    formatter=lambda x: x["name"],
-                )
-                if lang_sel and lang_sel.get("action") == "select":
-                    chosen = lang_sel["value"]["value"]
-                    if chosen == "preferred":
-                        include_all_subs = True      # pref_langs already set from settings
-                    elif chosen == "all":
-                        include_all_subs = True
-                        pref_langs = avail_codes      # embed everything
-                    elif chosen == "primary":
-                        include_all_subs = False
-                        pref_langs = [preferred_sub_lang]
-                    elif chosen == "none":
-                        preferred_sub_lang = "none"
-                        pref_langs = []
-                        include_all_subs = False
-                    else:
-                        preferred_sub_lang = chosen
-                        pref_langs = [chosen]
-                        include_all_subs = False
+            lang_opts, all_lang_codes = build_subtitle_menu_options(
+                preferred_sub_lang,
+                pref_langs,
+                avail_codes,
+                fallback_langs,
+            )
+            lang_sel = selection_menu(
+                lang_opts,
+                "Batch Download - Select Subtitle Languages",
+                show_details=False,
+                formatter=lambda x: x["name"],
+            )
+            if lang_sel and lang_sel.get("action") == "select":
+                chosen = lang_sel["value"]["value"]
+                if chosen == "preferred":
+                    include_all_subs = True
+                elif chosen == "all":
+                    include_all_subs = True
+                    pref_langs = all_lang_codes or pref_langs
+                elif chosen == "primary":
+                    include_all_subs = False
+                    pref_langs = [preferred_sub_lang]
+                elif chosen == "none":
+                    preferred_sub_lang = "none"
+                    pref_langs = []
+                    include_all_subs = False
+                else:
+                    preferred_sub_lang = chosen
+                    pref_langs = [chosen]
+                    include_all_subs = False
         except Exception as _pref_err:
             # Log preference selection error instead of silently swallowing it
             try:
@@ -2048,8 +2227,11 @@ class CinemaCLI:
         selected_quality = "auto"
         preferred_sub_lang = self.settings.get("preferred_subtitle", "ar")
         pref_langs = self.settings.get("preferred_subtitle_langs", [preferred_sub_lang])
+        fallback_langs = self.settings.get("fallback_subtitle_langs", ["ar", "en"])
         if not isinstance(pref_langs, list) or not pref_langs:
             pref_langs = [preferred_sub_lang]
+        if not isinstance(fallback_langs, list):
+            fallback_langs = ["ar", "en"]
         include_all_subs = len(pref_langs) > 1
 
         try:
@@ -2059,14 +2241,7 @@ class CinemaCLI:
             first_files = first_data.get("files", []) if isinstance(first_data, dict) else []
             first_subs  = first_data.get("subtitles", []) if isinstance(first_data, dict) else []
 
-            std_q_options = [
-                {"name": "✨ Best Available (Auto)", "value": "auto"},
-                {"name": "📺 4K (2160p)",          "value": "4k"},
-                {"name": "📺 1080p",               "value": "1080p"},
-                {"name": "📺 720p",                "value": "720p"},
-                {"name": "📺 480p",                "value": "480p"},
-                {"name": "📺 360p",                "value": "360p"},
-            ]
+            std_q_options = build_quality_menu_options(first_files)
             q_sel = selection_menu(
                 std_q_options, "Batch Download — Select Quality",
                 show_details=False, formatter=lambda x: x["name"],
@@ -2075,53 +2250,47 @@ class CinemaCLI:
                 selected_quality = q_sel["value"]["value"]
 
             # Subtitle language selection (same logic as TV batch)
-            if first_subs:
-                def _norm(l):
-                    l = (l or "").strip().lower()
-                    m2 = {"arabic":"ar","ara":"ar","ar":"ar","english":"en","eng":"en","en":"en",
-                          "french":"fr","fra":"fr","fre":"fr","fr":"fr","spanish":"es","spa":"es","es":"es",
-                          "german":"de","deu":"de","ger":"de","de":"de","turkish":"tr","tur":"tr","tr":"tr",
-                          "portuguese":"pt","por":"pt","pt":"pt","italian":"it","ita":"it","it":"it"}
-                    return m2.get(l, l or "und")
-                _lnames = {"ar":"Arabic","en":"English","fr":"French","es":"Spanish",
-                           "de":"German","tr":"Turkish","pt":"Portuguese","it":"Italian","und":"Unknown"}
-                avail_codes = []
-                for s in first_subs:
-                    if isinstance(s, dict):
-                        c = _norm(s.get("lang") or s.get("language"))
-                        if c not in avail_codes:
-                            avail_codes.append(c)
-                pref_label = ", ".join(_lnames.get(l, l) for l in pref_langs[:3])
-                lang_opts = [
-                    {"name": f"🌐 All Preferred ({pref_label})", "value": "preferred"},
-                    {"name": "🗂 All Available",                  "value": "all"},
-                    {"name": f"📝 Primary only ({_lnames.get(preferred_sub_lang, preferred_sub_lang)})", "value": "primary"},
-                ]
-                for code in avail_codes:
-                    lang_opts.append({"name": f"📝 {_lnames.get(code, code)}", "value": code})
-                lang_opts.append({"name": "🚫 No subtitles", "value": "none"})
-                lang_sel = selection_menu(
-                    lang_opts, "Batch Download — Select Subtitle Languages",
-                    show_details=False, formatter=lambda x: x["name"],
-                )
-                if lang_sel and lang_sel.get("action") == "select":
-                    chosen = lang_sel["value"]["value"]
-                    if chosen == "preferred":
-                        include_all_subs = True
-                    elif chosen == "all":
-                        include_all_subs = True
-                        pref_langs = avail_codes
-                    elif chosen == "primary":
-                        include_all_subs = False
-                        pref_langs = [preferred_sub_lang]
-                    elif chosen == "none":
-                        preferred_sub_lang = "none"
-                        pref_langs = []
-                        include_all_subs = False
-                    else:
-                        preferred_sub_lang = chosen
-                        pref_langs = [chosen]
-                        include_all_subs = False
+            def _norm(l):
+                l = (l or "").strip().lower()
+                m2 = {"arabic":"ar","ara":"ar","ar":"ar","english":"en","eng":"en","en":"en",
+                      "french":"fr","fra":"fr","fre":"fr","fr":"fr","spanish":"es","spa":"es","es":"es",
+                      "german":"de","deu":"de","ger":"de","de":"de","turkish":"tr","tur":"tr","tr":"tr",
+                      "portuguese":"pt","por":"pt","pt":"pt","italian":"it","ita":"it","it":"it"}
+                return m2.get(l, l or "und")
+            avail_codes = []
+            for s in first_subs:
+                if isinstance(s, dict):
+                    c = _norm(s.get("lang") or s.get("language"))
+                    if c not in avail_codes:
+                        avail_codes.append(c)
+            lang_opts, all_lang_codes = build_subtitle_menu_options(
+                preferred_sub_lang,
+                pref_langs,
+                avail_codes,
+                fallback_langs,
+            )
+            lang_sel = selection_menu(
+                lang_opts, "Batch Download — Select Subtitle Languages",
+                show_details=False, formatter=lambda x: x["name"],
+            )
+            if lang_sel and lang_sel.get("action") == "select":
+                chosen = lang_sel["value"]["value"]
+                if chosen == "preferred":
+                    include_all_subs = True
+                elif chosen == "all":
+                    include_all_subs = True
+                    pref_langs = all_lang_codes or pref_langs
+                elif chosen == "primary":
+                    include_all_subs = False
+                    pref_langs = [preferred_sub_lang]
+                elif chosen == "none":
+                    preferred_sub_lang = "none"
+                    pref_langs = []
+                    include_all_subs = False
+                else:
+                    preferred_sub_lang = chosen
+                    pref_langs = [chosen]
+                    include_all_subs = False
         except Exception:
             pass
 
@@ -2298,33 +2467,11 @@ class CinemaCLI:
                             break
 
         # ── QUALITY SELECTION (once, before action) ──
-        # Providers return HLS m3u8 adaptive streams — the resolution is embedded
-        # inside the manifest, not as metadata on the file object.  We therefore
-        # always offer the standard resolution options and let yt-dlp / mpv apply
-        # the selection against the manifest at playback / download time.
-        #
-        # If a provider *does* supply quality metadata we fold those options in as
-        # well, so any future provider upgrade is automatically surfaced in the UI.
         manifest_qualities = sort_manifest_qualities(files)
 
         selected_quality = "auto"
         if not autoplay:
-            # Fixed standard resolution options (always available for HLS streams)
-            std_options = [
-                {"name": "✨ Best Available (Auto)", "value": "auto"},
-                {"name": "🔄 Adaptive (match connection speed)", "value": "adaptive"},
-                {"name": "📺 4K (2160p)", "value": "4k"},
-                {"name": "📺 1080p", "value": "1080p"},
-                {"name": "📺 720p", "value": "720p"},
-                {"name": "📺 480p", "value": "480p"},
-                {"name": "📺 360p", "value": "360p"},
-            ]
-            # Append any additional quality tags that providers explicitly reported
-            for q in manifest_qualities:
-                tag = q.lower().replace(" ", "")
-                already_covered = any(tag in opt["value"] for opt in std_options)
-                if not already_covered:
-                    std_options.append({"name": f"📺 {q} (provider)", "value": q})
+            std_options = build_quality_menu_options(files, include_adaptive=True)
 
             q_sel = selection_menu(
                 std_options,
@@ -2339,68 +2486,58 @@ class CinemaCLI:
         preferred_sub_lang = self.settings.get("preferred_subtitle", "ar")
         # Ordered multi-language list from settings (primary first)
         pref_langs = self.settings.get("preferred_subtitle_langs", [preferred_sub_lang])
+        fallback_langs = self.settings.get("fallback_subtitle_langs", ["ar", "en"])
         if not isinstance(pref_langs, list) or not pref_langs:
             pref_langs = [preferred_sub_lang]
+        if not isinstance(fallback_langs, list):
+            fallback_langs = ["ar", "en"]
         # Keep primary in sync as first entry
         if pref_langs[0] != preferred_sub_lang:
             pref_langs = [preferred_sub_lang] + [l for l in pref_langs if l != preferred_sub_lang]
         include_all_subs = len(pref_langs) > 1  # default: embed all preferred langs
 
-        if subtitles:
-            lang_codes = []
-            for s in subtitles:
-                if isinstance(s, dict) and s.get("url"):
-                    code = _norm_lang(s.get("lang") or s.get("language"))
-                    if code not in lang_codes:
-                        lang_codes.append(code)
+        lang_codes = []
+        for s in subtitles:
+            if isinstance(s, dict) and s.get("url"):
+                code = _norm_lang(s.get("lang") or s.get("language"))
+                if code not in lang_codes:
+                    lang_codes.append(code)
 
-            if lang_codes:
-                # Build a human-readable label for the "All Preferred" option
-                _lnames = {
-                    "ar": "Arabic", "en": "English", "fr": "French", "es": "Spanish",
-                    "de": "German", "tr": "Turkish", "pt": "Portuguese", "it": "Italian",
-                    "zh": "Chinese", "ja": "Japanese", "ko": "Korean", "hi": "Hindi",
-                }
-                def _ll(c): return _lnames.get(c, c)
-                pref_label = ", ".join(_ll(l) for l in pref_langs[:3])
-                if len(pref_langs) > 3:
-                    pref_label += f" +{len(pref_langs)-3}"
+        sub_options, all_lang_codes = build_subtitle_menu_options(
+            preferred_sub_lang,
+            pref_langs,
+            lang_codes,
+            fallback_langs,
+        )
+        sub_title = f"{title} - Select Subtitles"
+        if not lang_codes:
+            sub_title += " (fallback search only)"
 
-                sub_options = [
-                    {"name": f"🌐 All Preferred ({pref_label})", "value": "preferred"},
-                    {"name": "🗂 All Available", "value": "all"},
-                    {"name": f"📝 Primary only ({_lang_label(preferred_sub_lang)})", "value": "primary"},
-                ]
-                for code in lang_codes:
-                    sub_options.append({"name": f"📝 {_lang_label(code)}", "value": code})
-                sub_options.append({"name": "🚫 No subtitles", "value": "none"})
-
-                sub_sel = selection_menu(
-                    sub_options,
-                    f"{title} - Select Subtitles",
-                    show_details=False,
-                    formatter=lambda x: x["name"],
-                )
-                if sub_sel and sub_sel.get("action") == "select":
-                    choice = sub_sel["value"]["value"]
-                    if choice == "preferred":
-                        include_all_subs = True   # pass pref_langs to player/downloader
-                    elif choice == "all":
-                        include_all_subs = True
-                        pref_langs = lang_codes    # use every available lang
-                    elif choice == "primary":
-                        include_all_subs = False
-                        pref_langs = [preferred_sub_lang]
-                    elif choice == "none":
-                        subtitles = []
-                        preferred_sub_lang = "none"
-                        pref_langs = []
-                        include_all_subs = False
-                    else:
-                        # User picked a specific language override
-                        preferred_sub_lang = choice
-                        pref_langs = [choice]
-                        include_all_subs = False
+        sub_sel = selection_menu(
+            sub_options,
+            sub_title,
+            show_details=False,
+            formatter=lambda x: x["name"],
+        )
+        if sub_sel and sub_sel.get("action") == "select":
+            choice = sub_sel["value"]["value"]
+            if choice == "preferred":
+                include_all_subs = True
+            elif choice == "all":
+                include_all_subs = True
+                pref_langs = all_lang_codes or pref_langs
+            elif choice == "primary":
+                include_all_subs = False
+                pref_langs = [preferred_sub_lang]
+            elif choice == "none":
+                subtitles = []
+                preferred_sub_lang = "none"
+                pref_langs = []
+                include_all_subs = False
+            else:
+                preferred_sub_lang = choice
+                pref_langs = [choice]
+                include_all_subs = False
 
         # ── Handle adaptive quality (speed test) ──
         if selected_quality == "adaptive":
@@ -2561,6 +2698,52 @@ class CinemaCLI:
                         quality=selected_quality if selected_quality not in ("auto", "adaptive") else None,
                     )
 
+                    instant_fail = (
+                        isinstance(stats, dict)
+                        and not stats.get("finished")
+                        and float(stats.get("position", 0) or 0) <= 2
+                        and float(stats.get("duration", 0) or 0) <= 2
+                    )
+
+                    if instant_fail:
+                        _auto_switch_count += 1
+                        self.api.report_source_result(selected.get("provider"), False)
+                        console.print("[yellow]Playback ended immediately. Trying another source...[/yellow]")
+                        time.sleep(0.8)
+
+                        _next = None
+                        for fs in fallback_sources:
+                            _u = fs.get("file", "")
+                            if _u and _u not in _tried_urls:
+                                _next = fs
+                                break
+
+                        if _next is None and meta and meta.get("tmdb_id"):
+                            fresh_data = self.api.get_sources_api(
+                                meta["tmdb_id"],
+                                meta.get("type", "movie"),
+                                meta.get("season"),
+                                meta.get("episode"),
+                                force_refresh=True,
+                            )
+                            _fresh_files = fresh_data.get("files", []) if isinstance(fresh_data, dict) else []
+                            _fresh_files, _fresh_mode = filter_sources_for_quality(_fresh_files, selected_quality)
+                            if _fresh_mode == "unavailable_tagged":
+                                _fresh_files = fresh_data.get("files", []) if isinstance(fresh_data, dict) else []
+                            for fs in _fresh_files:
+                                _u = fs.get("file", "")
+                                if _u and _u not in _tried_urls:
+                                    _next = fs
+                                    break
+
+                        if _next is not None and _auto_switch_count <= _auto_switch_max:
+                            selected = _next
+                            start_time = 0
+                            continue
+
+                        console.print("[red]No alternate playable source found.[/red]")
+                        return False
+
                     # If playback progressed but no video frames were detected,
                     # this source is likely audio-only/broken for the current player.
                     if isinstance(stats, dict) and stats.get("no_video"):
@@ -2643,15 +2826,7 @@ class CinemaCLI:
                         start_time = 0   # restart from beginning
                         continue
                     if pq_act == "switch":
-                        std_options = [
-                            {"name": "✨ Best Available (Auto)",          "value": "auto"},
-                            {"name": "🔄 Adaptive (match connection speed)", "value": "adaptive"},
-                            {"name": "📺 4K (2160p)",                    "value": "4k"},
-                            {"name": "📺 1080p",                         "value": "1080p"},
-                            {"name": "📺 720p",                          "value": "720p"},
-                            {"name": "📺 480p",                          "value": "480p"},
-                            {"name": "📺 360p",                          "value": "360p"},
-                        ]
+                        std_options = build_quality_menu_options(files, include_adaptive=True)
                         sq_sel = selection_menu(
                             std_options,
                             f"{title} — Switch Quality",
@@ -2660,33 +2835,6 @@ class CinemaCLI:
                         )
                         if sq_sel and sq_sel.get("action") == "select":
                             new_q = sq_sel["value"]["value"]
-                            # Handle adaptive probe
-                            if new_q == "adaptive":
-                                console.print(f"[bold {ACCENT}]Testing connection speed...[/bold {ACCENT}]")
-                                _PROBE_URLS2 = [
-                                    "https://speed.cloudflare.com/__down?bytes=102400",
-                                    "https://httpbin.org/bytes/102400",
-                                ]
-                                _spd = None
-                                for _pu in _PROBE_URLS2:
-                                    try:
-                                        _rq = Request(_pu, headers={"User-Agent": "Mozilla/5.0"})
-                                        _ts = time.time()
-                                        with urlopen(_rq, timeout=8) as _rsp:
-                                            _ck = _rsp.read(131072)
-                                        _te = time.time() - _ts
-                                        if _te > 0 and len(_ck) >= 8192:
-                                            _spd = (len(_ck) * 8) / (_te * 1_000_000)
-                                            break
-                                    except Exception:
-                                        continue
-                                if _spd is not None:
-                                    new_q = adaptive_quality_from_speed(_spd)
-                                    console.print(f"[green]{_spd:.1f} Mbps → {new_q}[/green]")
-                                else:
-                                    new_q = "auto"
-                                    console.print(f"[yellow]Speed test failed, using auto[/yellow]")
-                                time.sleep(0.8)
                             selected_quality = new_q
                             # Refilter files for the new quality
                             filtered_files, _switch_mode = filter_sources_for_quality(files, selected_quality)
@@ -3259,6 +3407,9 @@ if __name__ == "__main__":
             f"                    Required: --tmdb-id <id> --type <movie|tv>\n"
             f"                    TV only:  --season <n> --episode <n>\n"
             f"                    Optional: --include-all\n"
+            f"  --smoke           Tiny automated smoke test for movie/tv source selection\n"
+            f"                    Optional: --movie-id <id> --tv-id <id> --season <n> --episode <n>\n"
+            f"                              --skip-validation --timeout <sec>\n"
             f"\n"
             f"Keyboard shortcuts (inside the TUI):\n"
             f"  ↑ ↓ / j k        Navigate lists\n"
@@ -3276,6 +3427,9 @@ if __name__ == "__main__":
 
     if "--debug-subtitle" in _argv:
         sys.exit(run_debug_subtitle_command(_argv))
+
+    if "--smoke" in _argv:
+        sys.exit(run_smoke_command(_argv))
 
     # Ensure backend is started and healthy before instantiating the CLI.
     # Prefer user settings backend URL, then env/default config.
