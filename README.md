@@ -2,7 +2,6 @@
 
 > **Stream and download movies & TV shows from your terminal.**
 > A full-featured TUI client with multi-language subtitles, background downloads, theming, and more.
-> Source: 
 
 ---
 
