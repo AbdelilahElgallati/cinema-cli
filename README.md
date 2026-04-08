@@ -27,7 +27,8 @@ The setup script will:
 
 * Check **Python 3.9+**, **Node.js**, **mpv**, **ffmpeg**, **yt-dlp**
 * Create a virtual environment and install dependencies
-* Walk you through a guided first-run wizard (API keys, download folder, theme)
+* Auto-create a compatible `.env` (TMDB key, `PORT`, `BACKEND_URL`, subtitles key)
+* Walk you through a guided first-run wizard (API keys, backend port/URL, download folder, theme)
 * Create a `cinema` / `cinema.bat` launcher shortcut
 
 ---
@@ -145,7 +146,7 @@ cinema-cli/
 ├── cli/              Python TUI
 ├── setup.bat         Windows installer
 ├── setup.sh          Linux/macOS installer
-└── .env              API keys
+└── .env              API keys + backend config
 ```
 
 ---
@@ -167,7 +168,7 @@ python main.py --smoke
 | ------------------- | -------------------------------------- |
 | `mpv not found`     | Install mpv and re-run setup           |
 | `No streams found`  | Wait a few seconds; check backend logs |
-| Backend won’t start | Ensure `TMDB_API_KEY` exists in `.env` |
+| Backend won’t start | Ensure `.env` has valid `TMDB_API_KEY`, `PORT`, and `BACKEND_URL` |
 | Missing subtitles   | Add `OPENSUBTITLES_API_KEY`            |
 | Download stuck      | Retry; resume is automatic             |
 | Wrong theme colors  | Restart the app                        |

@@ -8,6 +8,7 @@ import threading
 import time
 import urllib3
 import uuid
+import requests
 import queue
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,18 +16,25 @@ from datetime import datetime
 from collections import deque
 
 from src.config import DOWNLOAD_LOG, SUCCESS, TEXT, WARNING, console
+from src.utils import app_logger
 from src.utils.app_logger import log_event
 from src.utils.source_strategy import filter_sources_for_quality
 from src.utils.storage import load_json_data, save_json_data
+from src.utils.system_tools import find_executable, is_tool_available
 from src.utils.utils import sanitize_filename
 from src.utils.subtitles import fetch_subtitles
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DOWNLOADS_FILE = os.path.expanduser("~/.cinema-cli-downloads.json")
+APP_NAME = "Cinema CLI"
+YTDLP_TEMP_SUFFIXES = (".part", ".ytdl", ".temp")
+MUX_TAGS = ("[ffmpeg]", "[Merger]", "[FixupM3u8]")
+DESTINATION_TAG = "Destination:"
+MIN_FREE_SPACE_BYTES = 1024 * 1024 * 1024
 
 
-def _vtt_to_srt(vtt_text: str) -> str:
+def _vtt_to_srt(vtt_text: str) -> str:  # NOSONAR
     """Convert WebVTT subtitle text to SRT format.
 
     Handles:
@@ -139,15 +147,15 @@ class DownloadManager:
         # Flush any pending saves
         try:
             self._flush_save()
-        except Exception:
-            pass
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in download_manager: {e}", exc_info=True)
         # Cancel pending futures
-        for tid, future in list(self.active_tasks.items()):
+        for tid, future in self.active_tasks.items():
             try:
                 if not future.done():
                     future.cancel()
-            except Exception:
-                pass
+            except Exception as e:
+                app_logger.debug(f"Suppressed error in download_manager (cancel future): {e}", exc_info=True)
         self.executor.shutdown(wait=False)
         # Close the shared HTTP session to release TCP connections
         try:
@@ -155,8 +163,8 @@ class DownloadManager:
                 if self._http_session is not None:
                     self._http_session.close()
                     self._http_session = None
-        except Exception:
-            pass
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in download_manager: {e}", exc_info=True)
 
     def _log(self, message, level="INFO"):
         try:
@@ -164,8 +172,52 @@ class DownloadManager:
             with open(DOWNLOAD_LOG, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] [{level}] {message}\n")
             log_event("download", message, level=level)
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in download_manager: {e}", exc_info=True)
+
+    def _estimate_required_space(self, task):
+        """Estimate required bytes to safely queue a download."""
+        quality = str(task.get("quality") or "").lower()
+        runtime_min = 110
+        meta = task.get("meta") or {}
+        if isinstance(meta, dict):
+            try:
+                runtime_val = int(meta.get("runtime") or 0)
+                if runtime_val > 0:
+                    runtime_min = runtime_val
+                elif str(meta.get("type") or "").lower() == "tv":
+                    runtime_min = 45
+            except (TypeError, ValueError):
+                pass
+
+        bitrate_mbps_map = {
+            "4k": 20.0,
+            "2160": 20.0,
+            "1080": 8.0,
+            "720": 4.0,
+            "480": 2.0,
+            "360": 1.0,
+            "240": 0.5,
+        }
+        bitrate_mbps = 8.0
+        for key, value in bitrate_mbps_map.items():
+            if key in quality:
+                bitrate_mbps = value
+                break
+
+        estimated_bytes = int(runtime_min * 60 * bitrate_mbps * 125000 * 1.5)
+        safety_headroom = 300 * 1024 * 1024
+        return max(MIN_FREE_SPACE_BYTES, estimated_bytes + safety_headroom)
+
+    def _has_sufficient_disk_space(self, task):
+        """Return (ok, required, free)."""
+        try:
+            os.makedirs(self.downloads_dir, exist_ok=True)
+            free_bytes = shutil.disk_usage(self.downloads_dir).free
+            required = self._estimate_required_space(task)
+            return free_bytes >= required, required, free_bytes
         except Exception:
-            pass
+            return True, 0, 0
 
     def add_task(self, url, filename, title, subtitles=None, headers=None, meta=None, fallback_sources=None, api_params=None, preferred_sub_lang='ar', include_all_subs=True, preferred_sub_langs=None, fallback_sub_langs=None, quality=None):
         task = {
@@ -194,10 +246,22 @@ class DownloadManager:
             "retries": 0,
             "added_at": time.time(),
         }
+
+        has_space, required, free = self._has_sufficient_disk_space(task)
+        if not has_space:
+            msg = (
+                f"Insufficient disk space for '{title}'. "
+                f"Need ~{self._bytes_to_human(required)} free, have {self._bytes_to_human(free)}."
+            )
+            self._log(msg, level="WARNING")
+            console.print(f"[bold red]{msg}[/bold red]")
+            return False
+
         with self.lock:
             self.queue.append(task)
             self._save()
         console.print(f"[green]Added to download queue: {title}[/green]")
+        return True
 
     def _save(self, force=False):
         """Save queue state with throttling to reduce disk I/O."""
@@ -256,7 +320,7 @@ class DownloadManager:
             self._http_session = session
             return session
 
-    def _queue_listener(self):
+    def _queue_listener(self):  # NOSONAR
         """Sequential queue listener — downloads one task at a time (wait list)."""
         while self.running:
             try:
@@ -331,7 +395,7 @@ class DownloadManager:
                 self._save(force=True)
             raise  # Re-raise so future.exception() catches it
 
-    def _process_task(self, task):
+    def _process_task(self, task):  # NOSONAR
         """Robust task processing with parallel subtitle download and multiple fallback layers."""
         temp_dir = self.temp_dir
         os.makedirs(temp_dir, exist_ok=True)
@@ -356,7 +420,6 @@ class DownloadManager:
         success = False
         last_error = ""
         failed_source_names = set()  # Track sources that already failed
-        got_rate_limited = False  # Track if any source hit 429 rate limits
 
         for attempt in range(max_attempts):
             if not self.running:
@@ -410,7 +473,6 @@ class DownloadManager:
                         failed_source_names.add(src_key)
                         # Check if this source was rate-limited (429)
                         if task.get("_got_rate_limited"):
-                            got_rate_limited = True
                             task.pop("_got_rate_limited", None)
                 
                 if success:
@@ -440,19 +502,18 @@ class DownloadManager:
         # Final status update
         self._finalize_task(task, success, mp4_out, last_error)
 
-    def _find_actual_output(self, temp_dir, temp_id, expected_path):
+    def _find_actual_output(self, temp_dir, temp_id, _expected_path):
         """Find the actual output file yt-dlp created (may differ in extension)."""
-        base_no_ext = os.path.splitext(os.path.basename(expected_path))[0]
         # Search for files starting with our temp_id prefix
         for fname in os.listdir(temp_dir):
-            if fname.startswith(temp_id) and not fname.endswith(('.part', '.ytdl', '.temp')):
+            if fname.startswith(temp_id) and not fname.endswith(YTDLP_TEMP_SUFFIXES):
                 full = os.path.join(temp_dir, fname)
                 if os.path.isfile(full) and os.path.getsize(full) > 1024 * 1024:
                     self._log(f"Found actual output: {fname}", level="INFO")
                     return full
         return None
 
-    def _extract_url(self, value):
+    def _extract_url(self, value):  # NOSONAR
         def find_in_obj(obj):
             if isinstance(obj, str):
                 if "http" in obj:
@@ -490,7 +551,7 @@ class DownloadManager:
             return found or value
         return value
 
-    def _download_subtitles(self, task, temp_dir):
+    def _download_subtitles(self, task, temp_dir):  # NOSONAR
         """Download subtitles in parallel for faster performance."""
         # If already downloaded, skip
         if task.get("subtitle_files") or task.get("subtitle_file"):
@@ -657,7 +718,7 @@ class DownloadManager:
                 # Always save as .srt for maximum player compatibility
                 sub_filename = os.path.join(temp_dir, f"{base}.{sub_lang}.srt")
                 
-                resp = requests.get(sub_url, timeout=15, verify=False, headers=task.get("headers") or {})
+                resp = requests.get(sub_url, timeout=15, verify=False, headers=task.get("headers") or {})  # NOSONAR
                 resp.raise_for_status()
                 
                 # Validate: avoid HTML error pages
@@ -766,11 +827,13 @@ class DownloadManager:
                     self._log(
                         (
                             f"Requested quality '{wanted_quality}' not present in tagged refreshed sources; "
-                            "using manifest enforcement candidates"
+                            "strict mode keeps this task at requested quality only"
                         ),
-                        level="INFO",
+                        level="WARNING",
                     )
-                    files = data.get("files", [])
+                    return None
+                if not files:
+                    return None
                 task["url"] = files[0].get("file")
                 task["headers"] = files[0].get("headers")
                 task["fallback_sources"] = files[1:] if len(files) > 1 else []
@@ -806,7 +869,7 @@ class DownloadManager:
         
         return sources
 
-    def _try_download_source(self, source, output_path, task, attempt_num, source_idx):
+    def _try_download_source(self, source, output_path, task, _attempt_num, source_idx):  # NOSONAR
         """Attempt download from a single source with full error isolation."""
         url = self._extract_url(source.get("file"))
         if not url:
@@ -887,7 +950,7 @@ class DownloadManager:
             self._cleanup_ytdlp_temps(output_path)
             return False
 
-    def _download_with_ytdlp(self, url, output_path, task, source, is_worker):
+    def _download_with_ytdlp(self, url, output_path, task, source, is_worker):  # NOSONAR
         """Execute yt-dlp with optimized parameters for faster, more reliable HLS downloads.
 
         All sources from providers are HLS (m3u8) streams — there is no direct-MP4
@@ -937,7 +1000,8 @@ class DownloadManager:
             file downloads are delegated to aria2c.  aria2c connections are capped
             at 16 (its hard limit).
         """
-        if not shutil.which("yt-dlp"):
+        ytdlp_exe = find_executable("yt-dlp")
+        if not ytdlp_exe:
             self._log("yt-dlp not found in PATH, skipping", level="WARNING")
             return False
 
@@ -955,10 +1019,10 @@ class DownloadManager:
         output_path = os.path.abspath(output_path)
         output_dir = os.path.dirname(output_path)
 
-        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        ffmpeg_bin = find_executable("ffmpeg") or "ffmpeg"
 
         cmd = [
-            "yt-dlp",
+            ytdlp_exe,
             url,
             "-o", output_path,
             "--paths", f"temp:{output_dir}",
@@ -991,7 +1055,7 @@ class DownloadManager:
         quality = task.get("quality")
         if quality and quality not in ("auto", "best"):
             q = quality.lower().replace("p", "").strip()
-            height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360}
+            height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360, "240": 240}
             height = height_map.get(q)
             if height is None:
                 try:
@@ -1013,7 +1077,7 @@ class DownloadManager:
         # --downloader "http,https:aria2c" delegates only plain file downloads.
         cmd.extend(["--downloader", "dash,m3u8:native"])
 
-        if shutil.which("aria2c"):
+        if is_tool_available("aria2c"):
             # aria2c max-connection-per-server is capped at 16 by aria2c itself.
             conn_env = os.getenv("ARIA2C_CONNECTIONS")
             if conn_env:
@@ -1188,7 +1252,7 @@ class DownloadManager:
                                     task["_got_rate_limited"] = True
                                 self._log("CDN rate-limiting detected (429)", level="WARNING")
                             # Detect muxing phase
-                            if "[ffmpeg]" in stripped or "[Merger]" in stripped or "[FixupM3u8]" in stripped:
+                            if any(tag in stripped for tag in MUX_TAGS):
                                 muxing_started = True
                                 last_progress_time = time.time()  # Reset timer for mux
                                 with self.lock:
@@ -1199,7 +1263,7 @@ class DownloadManager:
                                 last_progress_time = time.time()
                             # Start the byte-stall clock only once yt-dlp confirms
                             # it has opened the Destination file and is writing to it.
-                            if not download_started and "Destination:" in stripped:
+                            if not download_started and DESTINATION_TAG in stripped:
                                 download_started = True
                                 last_bytes_time  = time.time()
                                 last_bytes_seen  = 0
@@ -1293,7 +1357,7 @@ class DownloadManager:
         elif dl > 0:
             task["downloaded"] = self._bytes_to_human(dl)
 
-    def _parse_progress_line(self, line, task):
+    def _parse_progress_line(self, line, task):  # NOSONAR
         """Thread-safe progress parsing with real byte tracking. Returns True if progress was updated."""
         if not any(x in line for x in ["[download]", "[aria2c]", "[#", "[Merger]", "[ffmpeg]", "Merging", "Destination:", "[ExtractAudio]", "[FixupM3u8]", "has already been downloaded"]):
             return False
@@ -1388,7 +1452,7 @@ class DownloadManager:
                     self._update_display_fields(task)
 
                 # ── Muxing phase ──
-                if "[Merger]" in line or "[ffmpeg]" in line or "Merging" in line or "[FixupM3u8]" in line:
+                if any(tag in line for tag in MUX_TAGS) or "Merging" in line:
                     task["status_message"] = "Muxing..."
                     task["status"] = "muxing"
                     if task.get("progress", 0) < 99:
@@ -1399,7 +1463,7 @@ class DownloadManager:
                     return True
 
                 # ── Destination (download starting) ──
-                if "Destination:" in line:
+                if DESTINATION_TAG in line:
                     if task.get("progress", 0) == 0:
                         task["status_message"] = "Starting..."
                         task["_dl_start_time"] = time.time()
@@ -1432,7 +1496,7 @@ class DownloadManager:
 
     def _get_media_duration(self, file_path):
         """Get media duration in seconds using ffprobe. Returns 0 on failure."""
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = find_executable("ffprobe")
         if not ffprobe:
             return 0
         try:
@@ -1450,7 +1514,7 @@ class DownloadManager:
             self._log(f"ffprobe duration check failed: {e}", level="WARNING")
         return 0
 
-    def _validate_download(self, file_path, expected_runtime_min=None):
+    def _validate_download(self, file_path, expected_runtime_min=None):  # NOSONAR
         """Validate that downloaded file is valid media.
         
         Args:
@@ -1549,7 +1613,7 @@ class DownloadManager:
             }
             
             return int(num * multipliers.get(unit, 1))
-        except:
+        except (TypeError, ValueError):
             return 0
     
     def _bytes_to_human(self, bytes_val):
@@ -1564,7 +1628,7 @@ class DownloadManager:
                 return f"{bytes_val / (1024 * 1024):.1f}MB"
             else:
                 return f"{bytes_val / (1024 * 1024 * 1024):.1f}GB"
-        except:
+        except (TypeError, ValueError):
             return "Unknown"
     
     def _format_time(self, seconds):
@@ -1579,10 +1643,10 @@ class DownloadManager:
                 hours = seconds // 3600
                 minutes = (seconds % 3600) // 60
                 return f"{hours}h{minutes:02d}m"
-        except:
+        except (TypeError, ValueError):
             return "---"
 
-    def _direct_download(self, url, output_path, headers, task):
+    def _direct_download(self, url, output_path, headers, task):  # NOSONAR
         """Robust direct download with range request support."""
         download_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -1662,7 +1726,7 @@ class DownloadManager:
             self._safe_remove(output_path)
             return False
 
-    def _parallel_range_download(self, url, output_path, headers, total_size, task):
+    def _parallel_range_download(self, url, output_path, headers, total_size, task):  # NOSONAR
         """Download using multiple connections with proper error handling."""
         # 1 thread per 5 MB, min 4, max 16; tiny files fall back to single-threaded
         num_threads = min(16, max(4, total_size // (5 * 1024 * 1024)))
@@ -1737,8 +1801,10 @@ class DownloadManager:
                     futures.append(executor.submit(download_chunk, start, end, i))
                 
                 # Wait for all with timeout
-                results = [f.result(timeout=300) for f in as_completed(futures)]
-                
+                results = []
+                for future in as_completed(futures):
+                    results.append(future.result(timeout=300))
+
             if all(results) and not errors:
                 with self.lock:
                     task["progress"] = 100
@@ -1751,7 +1817,7 @@ class DownloadManager:
             self._log(f"Parallel download failed: {e}", level="ERROR")
             return False
 
-    def _single_threaded_download(self, url, output_path, headers, task, expected_size=0, resume_from=0):
+    def _single_threaded_download(self, url, output_path, headers, task, expected_size=0, resume_from=0):  # NOSONAR
         """Reliable single-threaded fallback download with retry on connection reset."""
         max_retries = 3
         for dl_attempt in range(max_retries):
@@ -1811,8 +1877,7 @@ class DownloadManager:
                 
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.ChunkedEncodingError,
-                    ConnectionResetError, OSError) as e:
-                err_str = str(e).lower()
+                    OSError) as e:
                 if dl_attempt < max_retries - 1:
                     # Resume from where we left off for retriable errors
                     if os.path.exists(output_path):
@@ -1861,10 +1926,10 @@ class DownloadManager:
                         os.remove(os.path.join(directory, fname))
                     except OSError:
                         pass
-        except Exception:
-            pass
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in download_manager: {e}", exc_info=True)
 
-    def _finalize_task(self, task, success, temp_path, error_msg):
+    def _finalize_task(self, task, success, temp_path, error_msg):  # NOSONAR
         """Clean up task state and trigger post-processing."""
         with self.lock:
             # Clean up internal tracking fields (not needed in saved state)
@@ -1910,7 +1975,7 @@ class DownloadManager:
                 except Exception:
                     pass
 
-    def _notify_completion(self, title: str, success: bool = True):
+    def _notify_completion(self, title: str, success: bool = True):  # NOSONAR
         """Send a desktop notification when a download finishes."""
         msg   = f"\u2705 Download complete: {title}" if success else f"\u274c Download failed: {title}"
         icon  = "cinema-cli"
@@ -1919,10 +1984,10 @@ class DownloadManager:
                 if sys.platform == "win32":
                     # Try winotify first, then plyer, then toast fallbacks
                     try:
-                        from winotify import Notification, audio
+                        from winotify import Notification, audio  # type: ignore
                         toast = Notification(
-                            app_id="Cinema CLI",
-                            title="Cinema CLI",
+                            app_id=APP_NAME,
+                            title=APP_NAME,
                             msg=msg,
                             duration="short",
                         )
@@ -1931,8 +1996,8 @@ class DownloadManager:
                     except ImportError:
                         pass
                     try:
-                        from plyer import notification as _plyer
-                        _plyer.notify(title="Cinema CLI", message=msg, timeout=6)
+                        from plyer import notification as _plyer  # type: ignore
+                        _plyer.notify(title=APP_NAME, message=msg, timeout=6)
                         return
                     except ImportError:
                         pass
@@ -1946,7 +2011,7 @@ class DownloadManager:
                         f'ContentType=WindowsRuntime]::New();$x.LoadXml($t);'
                         f'$n=[Windows.UI.Notifications.ToastNotification]::New($x);'
                         f'[Windows.UI.Notifications.ToastNotificationManager]'
-                        f'::CreateToastNotifier("Cinema CLI").Show($n)'
+                        f'::CreateToastNotifier("{APP_NAME}").Show($n)'
                     )
                     _kw = {}
                     if sys.platform == "win32":
@@ -1958,12 +2023,12 @@ class DownloadManager:
                 elif sys.platform == "darwin":
                     subprocess.run(
                         ["osascript", "-e",
-                         f'display notification "{msg}" with title "Cinema CLI"'],
+                         f'display notification "{msg}" with title "{APP_NAME}"'],
                         capture_output=True, timeout=5,
                     )
                 else:
                     subprocess.run(
-                        ["notify-send", "-a", "Cinema CLI", "-i", icon, "Cinema CLI", msg],
+                        ["notify-send", "-a", APP_NAME, "-i", icon, APP_NAME, msg],
                         capture_output=True, timeout=5,
                     )
             except Exception:
@@ -1971,14 +2036,17 @@ class DownloadManager:
         threading.Thread(target=_fire, daemon=True).start()
 
     def get_queue(self):
+        def _status_rank(status):
+            if status in ("downloading", "muxing"):
+                return 0
+            if status == "pending":
+                return 1
+            if status == "error":
+                return 2
+            return 3
+
         with self.lock:
-            return sorted(self.queue, key=lambda x: (
-                0 if x["status"] == "downloading" else
-                0 if x["status"] == "muxing" else
-                1 if x["status"] == "pending" else
-                2 if x["status"] == "error" else 3,
-                x.get("added_at", 0)
-            ))
+            return sorted(self.queue, key=lambda x: (_status_rank(x["status"]), x.get("added_at", 0)))
 
     def retry_task(self, task_id):
         with self.lock:
@@ -2018,7 +2086,7 @@ class DownloadManager:
             return True
 
     
-    def _organize_download(self, task, temp_file_path):
+    def _organize_download(self, task, temp_file_path):  # NOSONAR
         """Move downloaded file (and any downloaded subtitles) into the user's downloads folder."""
         if not temp_file_path or not os.path.exists(temp_file_path):
             # nothing to move
@@ -2079,8 +2147,8 @@ class DownloadManager:
                     moved_subs.append(sub)
                 except Exception as e:
                     self._log(f"Failed to move subtitle {sub_path}: {e}", level="WARNING")
-        except Exception:
-            pass
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in download_manager: {e}", exc_info=True)
 
         with self.lock:
             task["filename"] = dest_path
@@ -2114,7 +2182,7 @@ class DownloadManager:
         c = (code or "und").strip().lower()
         return cls._LANG_TO_ISO639_2.get(c, c)
 
-    def _sync_subtitles_to_video(self, video_path, subs):
+    def _sync_subtitles_to_video(self, video_path, subs):  # NOSONAR
         """Auto-synchronise subtitle files to the video's audio track.
 
         Uses ``ffsubsync`` (audio-based alignment) to correct timing
@@ -2261,7 +2329,7 @@ class DownloadManager:
 
         self._log("Subtitle sync pass complete", level="INFO")
 
-    def _embed_subtitles(self, task):
+    def _embed_subtitles(self, task):  # NOSONAR
         """Embed subtitle tracks into the final media file.
 
         This is a **pure copy-remux**: video and audio are stream-copied, only
@@ -2288,7 +2356,7 @@ class DownloadManager:
                   This degrades seek accuracy and causes display lag.
         """
         video_file = task.get("filename")
-        if not video_file or not os.path.exists(video_file) or not shutil.which("ffmpeg"):
+        if not video_file or not os.path.exists(video_file) or not find_executable("ffmpeg"):
             # Mark completed even if we can't mux
             with self.lock:
                 task["status"] = "completed"

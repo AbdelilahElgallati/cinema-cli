@@ -1,5 +1,6 @@
 """Simple logging utility for cinema-cli application."""
 import os
+import traceback
 from datetime import datetime
 from src.config import APP_LOG
 
@@ -25,3 +26,11 @@ def log_event(category: str, message: str, level: str = "INFO", correlation_id: 
     except Exception:
         # Silently fail - logging should never crash the app
         pass
+
+
+def debug(message: str, exc_info: bool = False):
+    """Log a debug message, optionally with exception traceback."""
+    msg = message
+    if exc_info:
+        msg += f"\n{traceback.format_exc()}"
+    log_event("system", msg, level="DEBUG")

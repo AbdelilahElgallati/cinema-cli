@@ -7,9 +7,10 @@ Guides the user through:
   2. Checking / installing required tools (mpv, ffmpeg, yt-dlp, aria2c)
   3. Collecting TMDB API key
   4. Collecting OpenSubtitles API key (optional)
-  5. Setting a download directory
-  6. Choosing a theme
-  7. Writing a .env file and settings.json stub
+    5. Configuring backend URL / PORT
+    6. Setting a download directory
+    7. Choosing a theme
+    8. Writing a compatible .env + settings.json
 """
 
 import json
@@ -20,6 +21,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from src.utils.system_tools import find_executable, get_tool_version
 
 # ── Rich / prompt_toolkit may not be installed on the very first run,
 #    so we fall back to plain print if needed. ─────────────────────────────────
@@ -34,7 +37,7 @@ try:
     def _input(prompt):
         return _console.input(prompt)
 except ImportError:
-    def _print(msg, *a, **kw):
+    def _print(msg):
         # Strip Rich markup
         import re
         print(re.sub(r"\[/?[^\]]*\]", "", str(msg)))
@@ -79,19 +82,21 @@ _PLAT = platform.system().lower()   # "windows" | "darwin" | "linux"
 
 def _check_tool(name: str) -> tuple[bool, str]:
     """Return (found, version_string)."""
-    path = shutil.which(name)
+    aliases = ["yt-dlp.exe"] if name == "yt-dlp" and os.name == "nt" else None
+    path = find_executable(name, aliases=aliases)
     if not path:
         return False, ""
-    try:
-        r = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=5)
-        ver = (r.stdout or r.stderr or "").strip().splitlines()[0][:60]
-    except Exception:
-        ver = path
+    ver = get_tool_version(path)
     return True, ver
 
 
 def _hint(tool: str) -> str:
-    plat = "darwin" if _PLAT == "darwin" else ("windows" if _PLAT == "windows" else "linux")
+    if _PLAT == "darwin":
+        plat = "darwin"
+    elif _PLAT == "windows":
+        plat = "windows"
+    else:
+        plat = "linux"
     return INSTALL_HINTS.get(tool, {}).get(plat, "See project README")
 
 
@@ -105,8 +110,22 @@ def _write_env(values: dict[str, str]):
                 k, _, v = line.partition("=")
                 existing[k.strip()] = v.strip()
     existing.update(values)
+
+    # Keep known keys first for readability and compatibility.
+    ordered_keys = [
+        "TMDB_API_KEY",
+        "PORT",
+        "BACKEND_URL",
+        "OPENSUBTITLES_API_KEY",
+        "DISABLE_CACHE",
+    ]
     lines = []
+    for k in ordered_keys:
+        if k in existing:
+            lines.append(f"{k}={existing[k]}")
     for k, v in existing.items():
+        if k in ordered_keys:
+            continue
         lines.append(f"{k}={v}")
     _ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -131,7 +150,7 @@ def _banner(title: str):
 # ── Individual steps ──────────────────────────────────────────────────────────
 
 def _step_python():
-    _banner("Step 1 / 6 — Python version")
+    _banner("Step 1 / 7 — Python version")
     major, minor = sys.version_info[:2]
     if (major, minor) >= (3, 9):
         _print(f"[green]✓  Python {major}.{minor} — OK[/green]")
@@ -141,8 +160,34 @@ def _step_python():
         sys.exit(1)
 
 
-def _step_tools() -> dict[str, bool]:
-    _banner("Step 2 / 6 — External tools")
+def _auto_install_tools(tools_to_install: list[str]) -> bool:
+    """Attempts to auto-install missing tools. Returns True if all succeeded."""
+    _print(f"\n[cyan]Attempting automatic installation for: {', '.join(tools_to_install)}[/cyan]")
+    all_success = True
+    for tool in tools_to_install:
+        if tool == "yt-dlp":
+            cmd = [sys.executable, "-m", "pip", "install", "yt-dlp", "--quiet"]
+        elif _PLAT == "windows":
+            winget_ids = {"mpv": "squid-box.mpv", "ffmpeg": "Gyan.FFmpeg", "aria2c": "aria2.aria2"}
+            cmd = ["winget", "install", "--id", winget_ids.get(tool, tool), "-e", "--accept-source-agreements", "--accept-package-agreements"]
+        elif _PLAT == "darwin":
+            cmd = ["brew", "install", tool]
+        else:
+            cmd = ["sudo", "apt-get", "install", "-y", tool]
+            
+        _print(f"[dim]Running: {' '.join(cmd)}[/dim]")
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+            _print(f"[green]  ✓ Successfully installed {tool}[/green]")
+        except Exception as e:
+            _print(f"[red]  ✗ Failed to install {tool} ({e})[/red]")
+            all_success = False
+            
+    return all_success
+
+
+def _step_tools() -> dict[str, bool]:  # NOSONAR
+    _banner("Step 2 / 7 — External tools")
 
     tools = [
         ("mpv",    True,  "Required for video playback"),
@@ -157,8 +202,15 @@ def _step_tools() -> dict[str, bool]:
     for name, required, desc in tools:
         found, ver = _check_tool(name)
         status[name] = found
-        icon  = "[green]✓[/green]" if found else ("[red]✗[/red]" if required else "[yellow]~[/yellow]")
-        label = "[green]Found[/green]"  if found else ("[red]MISSING[/red]" if required else "[dim]not found (optional)[/dim]")
+        if found:
+            icon = "[green]✓[/green]"
+            label = "[green]Found[/green]"
+        elif required:
+            icon = "[red]✗[/red]"
+            label = "[red]MISSING[/red]"
+        else:
+            icon = "[yellow]~[/yellow]"
+            label = "[dim]not found (optional)[/dim]"
         _print(f"  {icon}  {name:<10} {label}  [dim]{ver if found else desc}[/dim]")
         if not found:
             if required:
@@ -167,23 +219,40 @@ def _step_tools() -> dict[str, bool]:
             else:
                 _print(f"     [dim]→  Install (optional): {_hint(name)}[/dim]")
 
-    if missing_required:
+    missing_all = [n for n, req, _ in tools if not status.get(n)]
+    if missing_all:
         _print(
-            f"\n[bold red]  {len(missing_required)} required tool(s) are missing: "
-            f"{', '.join(missing_required)}[/bold red]"
+            f"\n[bold yellow]  {len(missing_all)} tool(s) are missing: "
+            f"{', '.join(missing_all)}[/bold yellow]"
         )
         choice = _input(
-            "\n[bold yellow]Continue anyway? You can install tools later. (y/N): [/bold yellow]"
+            "  Would you like Cinema CLI to automatically install them now? (y/N): "
         ).strip().lower()
-        if choice not in ("y", "yes"):
-            _print("[dim]Setup cancelled. Install the missing tools and re-run.[/dim]")
-            sys.exit(0)
+        if choice in ("y", "yes"):
+            _auto_install_tools(missing_all)
+            # Re-check status
+            for name in missing_all:
+                found, ver = _check_tool(name)
+                status[name] = found
+            missing_required = [n for n, req, _ in tools if req and not status.get(n)]
+            
+        if missing_required:
+            _print(
+                f"\n[bold red]  {len(missing_required)} required tool(s) are still missing: "
+                f"{', '.join(missing_required)}[/bold red]"
+            )
+            choice2 = _input(
+                "\n[bold yellow]Continue anyway? You can install tools later. (y/N): [/bold yellow]"
+            ).strip().lower()
+            if choice2 not in ("y", "yes"):
+                _print("[dim]Setup cancelled. Install the missing tools and re-run.[/dim]")
+                sys.exit(0)
 
     return status
 
 
 def _step_tmdb_key():
-    _banner("Step 3 / 6 — TMDB API key")
+    _banner("Step 3 / 7 — TMDB API key")
     _print(
         "  Cinema CLI uses The Movie Database (TMDB) for movie/TV metadata.\n"
         "  Get a free API key at: [bold cyan]https://www.themoviedb.org/settings/api[/bold cyan]\n"
@@ -210,7 +279,7 @@ def _step_tmdb_key():
 
 
 def _step_opensubs_key():
-    _banner("Step 4 / 6 — OpenSubtitles API key  (optional)")
+    _banner("Step 4 / 7 — OpenSubtitles API key  (optional)")
     _print(
         "  OpenSubtitles provides fallback subtitles when a source has none.\n"
         "  Get a free API key at: [bold cyan]https://www.opensubtitles.com/consumers[/bold cyan]\n"
@@ -233,13 +302,37 @@ def _step_opensubs_key():
     return key
 
 
+def _step_backend_config() -> tuple[int, str]:
+    _banner("Step 5 / 7 — Backend configuration")
+
+    existing_port = _load_env_key("PORT")
+    existing_url = _load_env_key("BACKEND_URL")
+    default_port = existing_port or "3010"
+
+    while True:
+        raw_port = _input(f"  Backend port [default: {default_port}]: ").strip() or default_port
+        try:
+            port = int(raw_port)
+            if 1 <= port <= 65535:
+                break
+        except Exception:
+            pass
+        _print("[red]  Invalid port. Enter a number between 1 and 65535.[/red]")
+
+    default_url = existing_url or f"http://localhost:{port}"
+    backend_url = _input(f"  Backend URL [default: {default_url}]: ").strip() or default_url
+
+    _print(f"[green]  ✓  Backend set to {backend_url} (PORT={port})[/green]")
+    return port, backend_url
+
+
 def _step_download_dir() -> str:
-    _banner("Step 5 / 6 — Download directory")
+    _banner("Step 6 / 7 — Download directory")
     default = str(Path.home() / "Downloads" / "CinemaCLI")
     _print(f"  Where should Cinema CLI save downloaded movies and episodes?\n"
            f"  [dim]Default: {default}[/dim]\n")
 
-    choice = _input(f"  Press Enter to use default, or type a path: ").strip()
+    choice = _input("  Press Enter to use default, or type a path: ").strip()
     directory = choice if choice else default
     directory = os.path.expanduser(directory)
     try:
@@ -251,7 +344,7 @@ def _step_download_dir() -> str:
 
 
 def _step_theme() -> str:
-    _banner("Step 6 / 6 — Theme")
+    _banner("Step 7 / 7 — Theme")
     themes = ["cinema", "blue", "purple", "green", "gold", "teal", "rose", "sunset", "mint"]
     _print("  Available themes:")
     for i, t in enumerate(themes, 1):
@@ -269,7 +362,7 @@ def _step_theme() -> str:
     return selected
 
 
-def _write_settings(download_dir: str, theme: str):
+def _write_settings(download_dir: str, theme: str, backend_url: str):
     """Write (or merge) settings into ~/.cinema-cli/settings.json."""
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     settings_path = _DATA_DIR / "settings.json"
@@ -281,7 +374,7 @@ def _write_settings(download_dir: str, theme: str):
         except Exception:
             pass
 
-    existing.setdefault("backend", os.getenv("BACKEND_URL", "http://localhost:3010"))
+    existing["backend"] = (backend_url or "http://localhost:3010").strip()
     existing["library_dir"]   = download_dir
     existing["theme"]          = theme
     if not existing.get("preferred_subtitle"):
@@ -331,11 +424,22 @@ def run_wizard(force: bool = False):
         _step_python()
         _step_tools()
         tmdb_key   = _step_tmdb_key()
-        _step_opensubs_key()
+        opensubs_key = _step_opensubs_key()
+        port, backend_url = _step_backend_config()
         dl_dir     = _step_download_dir()
         theme      = _step_theme()
 
-        _write_settings(dl_dir, theme)
+        _write_env(
+            {
+                "TMDB_API_KEY": tmdb_key or _load_env_key("TMDB_API_KEY"),
+                "PORT": str(port),
+                "BACKEND_URL": backend_url,
+                "OPENSUBTITLES_API_KEY": opensubs_key or _load_env_key("OPENSUBTITLES_API_KEY"),
+                "DISABLE_CACHE": _load_env_key("DISABLE_CACHE") or "false",
+            }
+        )
+
+        _write_settings(dl_dir, theme, backend_url)
         mark_setup_done()
 
         _print(
