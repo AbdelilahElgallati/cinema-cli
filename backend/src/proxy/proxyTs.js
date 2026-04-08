@@ -2,6 +2,7 @@
 import fetch from 'node-fetch';
 import https from 'https';
 import { DEFAULT_USER_AGENT } from './proxyserver.js';
+import { isAllowedStreamingUrl } from '../helpers/helper.js';
 
 const agent = new https.Agent({
   rejectUnauthorized: false,
@@ -9,7 +10,18 @@ const agent = new https.Agent({
 
 const shouldDebug = process.argv.includes('--debug');
 
+const AbortController = globalThis.AbortController;
+
 export async function proxyTs(targetUrl, headers, req, res) {
+  if (!targetUrl || !isAllowedStreamingUrl(targetUrl)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden: URL not in streaming allowlist.' }));
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
   const start = Date.now();
   if (shouldDebug) {
     console.log(`[TS Proxy] Incoming request for: ${targetUrl.substring(0, 50)}...`);
@@ -34,7 +46,10 @@ export async function proxyTs(targetUrl, headers, req, res) {
     const response = await fetch(targetUrl, {
       headers: fetchHeaders,
       agent,
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       console.error(

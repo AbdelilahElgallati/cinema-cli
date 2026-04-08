@@ -21,6 +21,18 @@ if errorlevel 1 (
 )
 
 for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
+for /f "tokens=1,2 delims=." %%a in ("%PYVER%") do (
+    set PY_MAJOR=%%a
+    set PY_MINOR=%%b
+)
+if %PY_MAJOR% LSS 3 (
+    echo  [ERROR] Python 3.9+ is required. Found: %PYVER%
+    pause & exit /b 1
+)
+if %PY_MAJOR% EQU 3 if %PY_MINOR% LSS 9 (
+    echo  [ERROR] Python 3.9+ is required. Found: %PYVER%
+    pause & exit /b 1
+)
 echo  [OK] Python %PYVER% found.
 
 :: ── Check Node.js ─────────────────────────────────────────────────────────────
@@ -32,11 +44,25 @@ if errorlevel 1 (
     exit /b 1
 )
 for /f "tokens=1" %%v in ('node --version 2^>^&1') do set NODEVER=%%v
+set NODE_MAJOR_VER=%NODEVER:v=%
+for /f "tokens=1 delims=." %%m in ("%NODE_MAJOR_VER%") do set NODE_MAJOR=%%m
+if %NODE_MAJOR% LSS 18 (
+    echo  [ERROR] Node.js 18+ is required. Found: %NODEVER%
+    pause & exit /b 1
+)
 echo  [OK] Node.js %NODEVER% found.
 
 :: ── Warn about optional tools ────────────────────────────────────────────────
 where mpv >nul 2>&1
 if errorlevel 1 (
+    if exist "%ProgramFiles%\mpv\mpv.exe" (
+        echo  [OK] mpv found at %ProgramFiles%\mpv\mpv.exe
+        goto :check_ffmpeg
+    )
+    if exist "%ProgramFiles(x86)%\mpv\mpv.exe" (
+        echo  [OK] mpv found at %ProgramFiles(x86)%\mpv\mpv.exe
+        goto :check_ffmpeg
+    )
     echo  [WARN] mpv not found  ^(required for playback^)
     echo         Install: winget install mpv
     echo                  OR download from https://mpv.io/installation/
@@ -44,14 +70,33 @@ if errorlevel 1 (
     echo  [OK] mpv found.
 )
 
+:check_ffmpeg
 where ffmpeg >nul 2>&1
 if errorlevel 1 (
+    if exist "%ProgramFiles%\ffmpeg\bin\ffmpeg.exe" (
+        echo  [OK] ffmpeg found at %ProgramFiles%\ffmpeg\bin\ffmpeg.exe
+        goto :check_ytdlp
+    )
+    if exist "%ProgramFiles(x86)%\ffmpeg\bin\ffmpeg.exe" (
+        echo  [OK] ffmpeg found at %ProgramFiles(x86)%\ffmpeg\bin\ffmpeg.exe
+        goto :check_ytdlp
+    )
     echo  [WARN] ffmpeg not found  ^(required for downloads^)
     echo         Install: winget install ffmpeg
 ) else (
     echo  [OK] ffmpeg found.
 )
 
+:check_ytdlp
+where yt-dlp >nul 2>&1
+if errorlevel 1 (
+    echo  [WARN] yt-dlp not found  ^(required for HLS streaming and downloads^)
+    echo         Install: winget install yt-dlp
+) else (
+    echo  [OK] yt-dlp found.
+)
+
+:check_aria2
 where aria2c >nul 2>&1
 if errorlevel 1 (
     echo  [INFO] aria2c not found  ^(optional — speeds up downloads^)
@@ -105,11 +150,13 @@ echo  [OK] Backend Node packages installed.
 if not exist "%~dp0.env" (
     if exist "%~dp0.env_example" (
         copy "%~dp0.env_example" "%~dp0.env" >nul
-        echo  [OK] .env created from .env_example  — edit it to add your API keys.
+        echo  [OK] .env created from .env_example.
     ) else (
         echo  TMDB_API_KEY=> "%~dp0.env"
+        echo  PORT=3010>> "%~dp0.env"
         echo  BACKEND_URL=http://localhost:3010>> "%~dp0.env"
         echo  OPENSUBTITLES_API_KEY=>> "%~dp0.env"
+        echo  DISABLE_CACHE=false>> "%~dp0.env"
         echo  [OK] .env stub created  — add your TMDB_API_KEY.
     )
 ) else (
@@ -120,8 +167,8 @@ if not exist "%~dp0.env" (
 set LAUNCHER=%~dp0cinema.bat
 (
     echo @echo off
-    echo cd /d "%~dp0"
-    echo "%VENV_DIR%\Scripts\python.exe" cli\main.py %%*
+    echo cd /d "%%~dp0"
+    echo "%%~dp0.venv\Scripts\python.exe" cli\main.py %%*
 ) > "%LAUNCHER%"
 echo  [OK] Launcher created: cinema.bat
 

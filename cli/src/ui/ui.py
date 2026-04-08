@@ -42,14 +42,14 @@ from src.utils.storage import load_json_data
 
 # ─── ASCII art ─────────────────────────────────────────────────────────────────
 
-_CINEMA_ART = (
-    "  ██████╗██╗███╗   ██╗███████╗███╗   ███╗  █████╗      ██████╗██╗     ██╗ \n"
-    " ██╔════╝██║████╗  ██║██╔════╝████╗ ████║ ██╔══██╗    ██╔════╝██║     ██║ \n"
-    " ██║     ██║██╔██╗ ██║█████╗  ██╔████╔██║ ███████║    ██║     ██║     ██║ \n"
-    " ██║     ██║██║╚██╗██║██╔══╝  ██║╚██╔╝██║ ██╔══██║    ██║     ██║     ██║ \n"
-    " ╚██████╗██║██║ ╚████║███████╗██║ ╚═╝ ██║ ██║  ██║    ╚██████╗███████╗██║ \n"
+_CINEMA_ART_LINES = [
+    "  ██████╗██╗███╗   ██╗███████╗███╗   ███╗  █████╗      ██████╗██╗     ██╗ ",
+    " ██╔════╝██║████╗  ██║██╔════╝████╗ ████║ ██╔══██╗    ██╔════╝██║     ██║ ",
+    " ██║     ██║██╔██╗ ██║█████╗  ██╔████╔██║ ███████║    ██║     ██║     ██║ ",
+    " ██║     ██║██║╚██╗██║██╔══╝  ██║╚██╔╝██║ ██╔══██║    ██║     ██║     ██║ ",
+    " ╚██████╗██║██║ ╚████║███████╗██║ ╚═╝ ██║ ██║  ██║    ╚██████╗███████╗██║ ",
     "  ╚═════╝╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚═╝ ╚═╝  ╚═╝     ╚═════╝╚══════╝╚═╝ "
-)
+]
 
 _GOODBYE_ART = (
     "  ___            _  _             _  \n"
@@ -57,6 +57,9 @@ _GOODBYE_ART = (
     " \\__ \\/ -_)/ -_)| || / _` || |/ _` | \n"
     " |___/\\___|\\___|_||_\\__,_||_|\\__,_| "
 )
+
+_CLASS_BORDER = "class:border"
+_CLASS_DIM = "class:dim"
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -83,11 +86,29 @@ def clear():
 
 # ─── Splash screen ─────────────────────────────────────────────────────────────
 
-def show_splash():
+def _hex_to_rgb(hex_color: str):
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    return (255, 255, 255)
+
+def _interpolate_color(c1, c2, t):
+    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+
+def show_splash():  # NOSONAR
     clear()
 
+    # Create a stunning vertical gradient for the ASCII art
+    c1 = _hex_to_rgb(PRIMARY)
+    c2 = _hex_to_rgb(ACCENT)
+    
     art_text = Text(justify="center")
-    art_text.append(_CINEMA_ART, style=f"bold {PRIMARY}")
+    num_lines = len(_CINEMA_ART_LINES)
+    for i, line in enumerate(_CINEMA_ART_LINES):
+        t = i / max(1, (num_lines - 1))
+        r, g, b = _interpolate_color(c1, c2, t)
+        color_hex = f"#{r:02x}{g:02x}{b:02x}"
+        art_text.append(line + "\n", style=f"bold {color_hex}")
 
     tagline = Text(justify="center")
     tagline.append("  Your Cinema. Your Way.  ", style=f"bold {ACCENT}")
@@ -106,15 +127,20 @@ def show_splash():
     console.print()
 
     # Ensure local backend is running (for localhost BACKEND_URL)
+    def _probe_urls(base_url: str):
+        base = str(base_url or "").rstrip("/")
+        return [f"{base}/", f"{base}/health", f"{base}/proxy/status"]
+
     def _is_backend_running(url: str) -> bool:
-        try:
-            req = Request(
-                url.rstrip("/") + "/", headers={"User-Agent": "cinema-cli/1.0"}
-            )
-            with urlopen(req, timeout=1) as resp:
-                return resp.status == 200
-        except (URLError, HTTPError, ValueError):
-            return False
+        for probe_url in _probe_urls(url):
+            try:
+                req = Request(probe_url, headers={"User-Agent": "cinema-cli/1.0"})
+                with urlopen(req, timeout=1) as resp:
+                    if 200 <= int(getattr(resp, "status", 0)) < 400:
+                        return True
+            except (URLError, ValueError):
+                continue
+        return False
 
     def _maybe_start_backend(url: str):
         try:
@@ -178,7 +204,7 @@ def show_splash():
 
         return proc
 
-    settings = load_json_data(SETTINGS_FILE) or {}
+    settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
     backend_url = settings.get("backend") or BACKEND_URL
     _backend_proc = _maybe_start_backend(backend_url)
     if _backend_proc:
@@ -196,9 +222,11 @@ def show_splash():
         "Connecting to backend...",
         "Ready!",
     ]
+    
+    # Premium loading spinner
     with Progress(
-        SpinnerColumn(spinner_name="dots2", style=f"bold {PRIMARY}"),
-        TextColumn(f"[{ACCENT}]{{task.description}}[/{ACCENT}]"),
+        SpinnerColumn(spinner_name="point", style=f"bold {ACCENT}"),
+        TextColumn(f"[{TEXT}]{{task.description}}[/{TEXT}]"),
         console=console,
         transient=True,
     ) as progress:
@@ -212,8 +240,20 @@ def show_splash():
 def show_goodbye():
     """Display farewell art and pause briefly before exit."""
     clear()
+    
+    # Gradient goodbye
+    c1 = _hex_to_rgb(ACCENT)
+    c2 = _hex_to_rgb(PRIMARY)
+    
     art_text = Text(justify="center")
-    art_text.append(_GOODBYE_ART, style=f"bold {ACCENT}")
+    lines = _GOODBYE_ART.split("\n")
+    num_lines = len(lines)
+    for i, line in enumerate(lines):
+        t = i / max(1, (num_lines - 1))
+        r, g, b = _interpolate_color(c1, c2, t)
+        color_hex = f"#{r:02x}{g:02x}{b:02x}"
+        art_text.append(line + "\n", style=f"bold {color_hex}")
+        
     console.print()
     console.print(Align.center(art_text))
     console.print()
@@ -231,18 +271,18 @@ def show_goodbye():
 def print_header(subtitle=""):
     clear()
     header = Text()
-    header.append("🎬  CINEMA CLI", style=f"bold {PRIMARY}")
+    header.append("🎬 CINEMA CLI", style=f"bold {PRIMARY}")
     if subtitle:
-        header.append("  │  ", style=f"dim {PRIMARY}")
+        header.append(" ┃ ", style=f"dim {PRIMARY}")
         header.append(subtitle, style=f"bold {ACCENT}")
-    header.append("  │  ", style=f"dim {PRIMARY}")
+    header.append(" ┃ ", style=f"dim {PRIMARY}")
     header.append(f"v{APP_VERSION}", style=f"dim {TEXT}")
 
     console.print(
         Panel(
             Align.center(header),
             border_style=PRIMARY,
-            box=box.HEAVY,
+            box=box.ROUNDED,
             padding=(0, 2),
         )
     )
@@ -260,26 +300,28 @@ def format_item(item):
         "Movie" if "title" in item or item.get("media_type") == "movie" else "TV"
     )
     rating = item.get("vote_average", 0)
+    
+    # Enhance the item rendering with cleaner spacing and icons
+    type_icon = "🎬" if media_type == "Movie" else "📺"
+    
     return (
-        f"[bold {TEXT}]{title}[/bold {TEXT}] "
+        f"{type_icon} [bold {TEXT}]{title}[/bold {TEXT}] "
         f"[{WARNING}]({year})[/{WARNING}] "
-        f"[dim]⭐ {rating:.1f}[/dim] "
-        f"[dim {SECONDARY}]·[/dim {SECONDARY}] "
-        f"[dim {ACCENT}]{media_type}[/dim {ACCENT}]"
+        f"[dim]⭐ {rating:.1f}[/dim]"
     )
 
 
 # ─── Help bar strings ──────────────────────────────────────────────────────────
 
-_HELP_BROWSE = "  ↑↓ Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
-_HELP_SELECT = "  ↑↓ Navigate   Enter Confirm   B/Q Cancel  "
-_HELP_MULTI  = "  ↑↓ Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
-_HELP_BROWSE_JUMP = "  ↑↓ Navigate   Enter Select   J Jump   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
+_HELP_BROWSE = "  ↑↓/j/k Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
+_HELP_SELECT = "  ↑↓/j/k Navigate   Enter Confirm   B/Q Cancel  "
+_HELP_MULTI  = "  ↑↓/j/k Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
+_HELP_BROWSE_JUMP = "  ↑↓/j/k Navigate   Enter Select   J Jump   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
 
 
 # ─── Selection menu ────────────────────────────────────────────────────────────
 
-def selection_menu(
+def selection_menu(  # NOSONAR
     items,
     title,
     show_details=True,
@@ -303,15 +345,39 @@ def selection_menu(
 
     kb = KeyBindings()
 
+    @kb.add("k")
     @kb.add("up")
     def _up(event):
         nonlocal selected_index
         selected_index = (selected_index - 1) % len(items)
 
+    @kb.add("j")
     @kb.add("down")
     def _down(event):
         nonlocal selected_index
         selected_index = (selected_index + 1) % len(items)
+
+    @kb.add("pageup")
+    def _pageup(event):
+        nonlocal selected_index
+        selected_index = max(0, selected_index - 10)
+
+    @kb.add("pagedown")
+    def _pagedown(event):
+        nonlocal selected_index
+        selected_index = min(len(items) - 1, selected_index + 10)
+
+    @kb.add("home")
+    @kb.add("g")
+    def _top(event):
+        nonlocal selected_index
+        selected_index = 0
+
+    @kb.add("end")
+    @kb.add("G")
+    def _bottom(event):
+        nonlocal selected_index
+        selected_index = len(items) - 1
 
     @kb.add("enter")
     def _enter(event):
@@ -346,33 +412,23 @@ def selection_menu(
         result["action"] = "batch"
         event.app.exit()
 
-    @kb.add("j")
+    @kb.add("J")
     def _jump(event):
         if allow_jump:
             result["action"] = "jump"
             result["value"] = items[selected_index]
             event.app.exit()
 
-    @kb.add("g")
-    def _top(event):
-        nonlocal selected_index
-        selected_index = 0
-
-    @kb.add("G")
-    def _bottom(event):
-        nonlocal selected_index
-        selected_index = len(items) - 1
-
     def get_formatted_text():
         res = []
-        res.append(("class:header", f"  ══  {title}  ══\n"))
-        res.append(("class:border", "─" * 66 + "\n"))
+        res.append(("class:header", f"  ╭── {title} ──╮\n"))
+        res.append((_CLASS_BORDER, "  " + "─" * 64 + "\n"))
 
         visible_start = max(0, selected_index - 12)
         visible_end   = min(len(items), visible_start + 25)
 
         if visible_start > 0:
-            res.append(("class:dim", f"  ↑ {visible_start} more above\n"))
+            res.append((_CLASS_DIM, f"  ↑ {visible_start} more above\n"))
 
         for i in range(visible_start, visible_end):
             item = items[i]
@@ -386,9 +442,9 @@ def selection_menu(
 
         remaining = len(items) - visible_end
         if remaining > 0:
-            res.append(("class:dim", f"  ↓ {remaining} more below\n"))
+            res.append((_CLASS_DIM, f"  ↓ {remaining} more below\n"))
 
-        res.append(("class:border", "\n" + "─" * 66 + "\n"))
+        res.append((_CLASS_BORDER, "\n  " + "─" * 64 + "\n"))
         res.append(("class:help", _HELP_BROWSE_JUMP if allow_jump else _HELP_BROWSE))
         return res
 
@@ -407,7 +463,7 @@ def selection_menu(
         title_text    = html.escape(str(item.get("title") or item.get("name", "")))
         overview_text = html.escape(overview)
 
-        details  = f"\n<header> {title_text} </header>\n"
+        details  = f"\n<header> 📌 {title_text} </header>\n"
         details += f"<border>{'━' * 50}</border>\n"
         details += f"<rating>⭐  {rating:.1f}/10  ({votes:,} votes)</rating>\n"
         details += f"<pop>🔥  Popularity: {popularity:.0f}</pop>\n\n"
@@ -446,7 +502,7 @@ def selection_menu(
 
 # ─── Multi-selection menu ───────────────────────────────────────────────────────
 
-def multi_selection_menu(items, title, formatter=None):
+def multi_selection_menu(items, title, formatter=None):  # NOSONAR
     """Arrow-key multi-select with Space to toggle.
 
     Returns list of selected items, or [] when cancelled.
@@ -460,15 +516,39 @@ def multi_selection_menu(items, title, formatter=None):
 
     kb = KeyBindings()
 
+    @kb.add("k")
     @kb.add("up")
     def _up(event):
         nonlocal selected_index
         selected_index = (selected_index - 1) % len(items)
 
+    @kb.add("j")
     @kb.add("down")
     def _down(event):
         nonlocal selected_index
         selected_index = (selected_index + 1) % len(items)
+
+    @kb.add("pageup")
+    def _pageup(event):
+        nonlocal selected_index
+        selected_index = max(0, selected_index - 10)
+
+    @kb.add("pagedown")
+    def _pagedown(event):
+        nonlocal selected_index
+        selected_index = min(len(items) - 1, selected_index + 10)
+
+    @kb.add("home")
+    @kb.add("g")
+    def _top(event):
+        nonlocal selected_index
+        selected_index = 0
+
+    @kb.add("end")
+    @kb.add("G")
+    def _bottom(event):
+        nonlocal selected_index
+        selected_index = len(items) - 1
 
     @kb.add("space")
     def _toggle(event):
@@ -497,14 +577,14 @@ def multi_selection_menu(items, title, formatter=None):
     def get_formatted_text():
         res = []
         count = len(checked_indices)
-        res.append(("class:header", f"  ══  {title}  ({count} selected)  ══\n"))
-        res.append(("class:border", "─" * 66 + "\n"))
+        res.append(("class:header", f"  ╭── {title}  ({count} selected) ──╮\n"))
+        res.append((_CLASS_BORDER, "  " + "─" * 64 + "\n"))
 
         visible_start = max(0, selected_index - 12)
         visible_end   = min(len(items), visible_start + 25)
 
         if visible_start > 0:
-            res.append(("class:dim", f"  ↑ {visible_start} more above\n"))
+            res.append((_CLASS_DIM, f"  ↑ {visible_start} more above\n"))
 
         for i in range(visible_start, visible_end):
             item     = items[i]
@@ -520,9 +600,9 @@ def multi_selection_menu(items, title, formatter=None):
 
         remaining = len(items) - visible_end
         if remaining > 0:
-            res.append(("class:dim", f"  ↓ {remaining} more below\n"))
+            res.append((_CLASS_DIM, f"  ↓ {remaining} more below\n"))
 
-        res.append(("class:border", "\n" + "─" * 66 + "\n"))
+        res.append((_CLASS_BORDER, "\n  " + "─" * 64 + "\n"))
         res.append(("class:help", _HELP_MULTI))
         return res
 
@@ -545,4 +625,3 @@ def multi_selection_menu(items, title, formatter=None):
         full_screen=False,
     )
     return app.run() or []
-

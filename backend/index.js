@@ -30,10 +30,17 @@ function getCorrelationId(req) {
   return `backend-${crypto.randomBytes(6).toString('hex')}`;
 }
 
-// Updated CORS middleware to allow everything
+// Restrict CORS to localhost only to prevent cross-site request abuse
 app.use(
   cors({
-    origin: '*',
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g., CLI tools, curl) or from localhost
+      if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('CORS: origin not allowed'));
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
@@ -170,8 +177,8 @@ const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 
 if (isMain) {
   startup();
-  app.listen(PORT, () => {
-    console.log(`Server is running on port http://localhost:${PORT}`);
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Server is running on http://127.0.0.1:${PORT}`);
     if (process.argv.includes('--debug')) {
       console.log(`Debug mode is enabled.`);
       console.log('Cache is disabled.');

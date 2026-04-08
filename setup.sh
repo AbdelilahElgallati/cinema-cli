@@ -65,7 +65,14 @@ if ! command -v node >/dev/null 2>&1; then
     fi
     exit 1
 fi
-ok "Node.js $(node --version) found."
+
+NODE_VERSION=$(node -e "process.stdout.write(process.version.slice(1))")
+NODE_MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
+if [ "$NODE_MAJOR" -lt 18 ]; then
+    error "Node.js 18+ is required. Found: v$NODE_VERSION"
+    exit 1
+fi
+ok "Node.js v$NODE_VERSION found."
 
 # ── Check optional tools ───────────────────────────────────────────────────────
 for tool in mpv ffmpeg; do
@@ -118,7 +125,7 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
         cp "$SCRIPT_DIR/.env_example" "$SCRIPT_DIR/.env"
         ok ".env created from .env_example — edit it to add your API keys."
     else
-        printf 'TMDB_API_KEY=\nBACKEND_URL=http://localhost:3010\nOPENSUBTITLES_API_KEY=\n' \
+        printf 'TMDB_API_KEY=\nPORT=3010\nBACKEND_URL=http://localhost:3010\nOPENSUBTITLES_API_KEY=\nDISABLE_CACHE=false\n' \
             > "$SCRIPT_DIR/.env"
         ok ".env stub created — add your TMDB_API_KEY."
     fi

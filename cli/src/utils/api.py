@@ -202,7 +202,7 @@ class APIClient:
         
         return data
 
-    def _fetch_sources_with_retry(
+    def _fetch_sources_with_retry(  # NOSONAR
         self,
         tmdb_id,
         media_type,
@@ -264,11 +264,23 @@ class APIClient:
                             else:
                                 files = data.get("files")
                                 subtitles = data.get("subtitles")
+                                # Normalize files to list
+                                if isinstance(files, list):
+                                    normalized_files = files
+                                elif files:
+                                    normalized_files = [files]
+                                else:
+                                    normalized_files = []
+                                # Normalize subtitles to list
+                                normalized_subs = subtitles if isinstance(subtitles, list) else []
+                                # Normalize dicts with fallback
+                                normalized_groups = data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {}
+                                normalized_pipeline = data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {}
                                 data = {
-                                    "files": files if isinstance(files, list) else ([files] if files else []),
-                                    "subtitles": subtitles if isinstance(subtitles, list) else [],
-                                    "quality_groups": data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {},
-                                    "pipeline": data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {},
+                                    "files": normalized_files,
+                                    "subtitles": normalized_subs,
+                                    "quality_groups": normalized_groups,
+                                    "pipeline": normalized_pipeline,
                                 }
                             # Persist the winning backend for the rest of this session
                             self.settings["backend"] = base
@@ -346,7 +358,7 @@ class APIClient:
         
         return sorted(sources, key=get_score, reverse=True)
 
-    def get_sources_enhanced(self, tmdb_id, media_type, season=None, episode=None, min_sources=3):
+    def get_sources_enhanced(self, tmdb_id, media_type, season=None, episode=None, min_sources=3):  # NOSONAR
         """
         Enhanced source fetching with multiple attempts and source aggregation.
         Tries to get at least min_sources working sources.

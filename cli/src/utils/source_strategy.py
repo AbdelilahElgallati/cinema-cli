@@ -3,14 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 
-_FALLBACK_QUALITY_OPTIONS = [
-    {"name": "📺 1080p", "value": "1080p"},
-    {"name": "📺 720p", "value": "720p"},
-    {"name": "📺 480p", "value": "480p"},
-    {"name": "📺 360p", "value": "360p"},
-]
-
-
 def quality_sort_key(quality: str) -> int:
     q = (quality or "").lower()
     if "4k" in q or "2160" in q:
@@ -23,7 +15,9 @@ def quality_sort_key(quality: str) -> int:
         return 3
     if "360" in q:
         return 4
-    return 5
+    if "240" in q:
+        return 5
+    return 6
 
 
 def sort_manifest_qualities(files: List[Dict[str, Any]]) -> List[str]:
@@ -39,6 +33,10 @@ def sort_manifest_qualities(files: List[Dict[str, Any]]) -> List[str]:
 def build_quality_menu_options(
     files: List[Dict[str, Any]], include_adaptive: bool = False
 ) -> List[Dict[str, str]]:
+    """Build quality menu from qualities actually detected for this title.
+
+    If providers do not expose quality tags, only Auto/Adaptive are shown.
+    """
     qualities = [q for q in sort_manifest_qualities(files) if (q or "").lower() != "unknown"]
 
     options: List[Dict[str, str]] = [{"name": "✨ Best Available (Auto)", "value": "auto"}]
@@ -47,9 +45,6 @@ def build_quality_menu_options(
 
     if qualities:
         options.extend([{"name": f"📺 {q}", "value": q} for q in qualities])
-        return options
-
-    options.extend(_FALLBACK_QUALITY_OPTIONS)
     return options
 
 

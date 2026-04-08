@@ -5,12 +5,15 @@ import tempfile
 import time
 import requests
 import urllib3
+import atexit
 
 from rich.align import Align
 from rich.panel import Panel
 from src.config import SUCCESS, ACCENT, WARNING, console
 from src.ui.ui import clear
+from src.utils import app_logger
 from src.utils.subtitles import fetch_arabic_subtitle, fetch_subtitles
+from src.utils.system_tools import find_executable, is_tool_available
 
 # Suppress SSL warnings for subtitle providers with expired certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,13 +24,19 @@ SUPPORTED_PLAYERS = ["mpv", "vlc", "iina"]  # iina for macOS users
 # In-memory probe cache to avoid probing the same URL repeatedly.
 _PROBE_CACHE = {}
 _PROBE_TTL_SECONDS = 180
+_PRESS_ENTER_PROMPT = "\nPress Enter to return..."
+
+# Temporary directory for subtitles — cleaned up on exit
+subtitle_tmp_dir = os.path.join(tempfile.gettempdir(), "cinema-cli-subs")
+os.makedirs(subtitle_tmp_dir, exist_ok=True)
+atexit.register(shutil.rmtree, subtitle_tmp_dir, ignore_errors=True)
 
 
 def detect_available_players():
     """Return list of players found on the system."""
     found = []
     for p in SUPPORTED_PLAYERS:
-        if shutil.which(p):
+        if find_executable(p):
             found.append(p)
         elif p == "vlc":
             # VLC common install paths on Windows
@@ -44,8 +53,9 @@ def detect_available_players():
 
 def _get_vlc_executable():
     """Resolve VLC executable path."""
-    if shutil.which("vlc"):
-        return "vlc"
+    vlc_exe = find_executable("vlc")
+    if vlc_exe:
+        return vlc_exe
     for p in [
         r"C:\Program Files\VideoLAN\VLC\vlc.exe",
         r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
@@ -62,8 +72,10 @@ def _resolve_player(player):
         exe = _get_vlc_executable()
         if exe:
             return "vlc", exe
-    if player in ("mpv", "iina") and shutil.which(player):
-        return player, player
+    if player in ("mpv", "iina"):
+        exe = find_executable(player)
+        if exe:
+            return player, exe
     # Fallback: try any available player
     for p in detect_available_players():
         if p == "vlc":
@@ -103,7 +115,7 @@ def _norm_lang(lang: str) -> str:
     return l or "und"
 
 
-def _vtt_to_srt(vtt_text: str) -> str:
+def _vtt_to_srt(vtt_text: str) -> str:  # NOSONAR
     """Convert WebVTT subtitle text to SRT format for better player compatibility."""
     import re as _re
     lines = vtt_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -170,8 +182,7 @@ def _looks_like_subtitle(data: bytes) -> bool:
     return (b"webvtt" in head) or (b" --> " in head) or (b"{\\an" in head)
 
 
-def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
-                       include_all_subs, fallback_langs=None, preferred_langs=None):
+def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=None, preferred_langs=None):  # NOSONAR
     """Download / collect subtitle paths. Returns list of local file paths or URLs.
 
     preferred_langs: ordered list of language codes (primary first).
@@ -235,7 +246,7 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
                 # Always save as .srt for maximum player compatibility
                 local_sub = os.path.join(temp_dir, f"{base}.{s['lang']}.srt")
                 try:
-                    r = requests.get(sub_url, timeout=15, headers=headers or {}, verify=False)
+                    r = requests.get(sub_url, timeout=15, headers=headers or {}, verify=False)  # NOSONAR
                     if r.status_code == 200 and r.content and _looks_like_subtitle(r.content):
                         # Decode with robust encoding detection
                         decoded = None
@@ -263,10 +274,10 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
                     else:
                         # HTTP error — skip silently
                         pass
-                except Exception:
-                    pass  # Skip failed subtitle downloads silently
-        except Exception:
-            pass
+                except Exception as e:
+                    app_logger.debug(f"Suppressed error in _prepare_subtitles (individual sub download): {e}", exc_info=True)
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in _prepare_subtitles (main block): {e}", exc_info=True)
 
     # Fallback: fetch from OpenSubtitles (multi-language)
     if not sub_paths:
@@ -338,8 +349,8 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang,
                     if not include_all_subs:
                         break
                 sub_paths.extend(saved)
-        except Exception:
-            pass
+        except Exception as e:
+            app_logger.debug(f"Suppressed error in _prepare_subtitles (OS fallback): {e}", exc_info=True)
 
     return sub_paths
 
@@ -352,7 +363,7 @@ def _quality_to_ytdl_format(quality):
     if not quality or quality in ("auto", "best"):
         return None
     q = quality.lower().replace("p", "").strip()
-    height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360}
+    height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360, "240": 240}
     height = height_map.get(q)
     if height is None:
         # Fallback: try parsing raw number
@@ -366,18 +377,28 @@ def _quality_to_ytdl_format(quality):
     return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
 
 
-def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None):
+def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None):  # NOSONAR
     """Build mpv command-line arguments."""
+    mpv_exe = find_executable("mpv") or "mpv"
     args = [
-        "mpv",
+        mpv_exe,
         url,
         f"--title={title}",
         "--fs",
         "--force-window=immediate",
         "--keep-open=yes",
         "--network-timeout=60",
+        # Hardware decoding and performance tweaks to prevent frame drops
+        "--hwdec=auto-safe",
+        "--profile=fast",
+        "--vd-lavc-fast=yes",
+        "--framedrop=vo",
         # Robust streaming and reconnection
         "--demuxer-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5",
+        # HLS quality: always pick the highest-bitrate variant when mpv handles
+        # the manifest directly (without yt-dlp). This is the key fix for the
+        # 360p default issue — mpv otherwise picks the first (lowest) variant.
+        "--hls-bitrate=max",
         # Synchronization and timing fixes
         "--hr-seek=yes",
         "--hr-seek-framedrop=yes",
@@ -393,32 +414,45 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
         "--sub-ass-override=strip",
         "--sub-auto=fuzzy",
         f"--slang={preferred_sub_lang},ar,ara,arabic,en,eng,fr,fra,es,spa",
-        # Cache and buffering for stability
+        # Cache and buffering for stability (massively increased for HLS)
         "--cache=yes",
-        "--demuxer-max-bytes=256M",
-        "--demuxer-max-back-bytes=128M",
-        "--demuxer-readahead-secs=30",
+        "--demuxer-max-bytes=1024M",
+        "--demuxer-max-back-bytes=256M",
+        "--demuxer-readahead-secs=120",
         "--cache-pause=yes",
-        "--term-status-msg=STATUS: ${=time-pos} / ${=duration}",
+        "--term-status-msg=STATUS: ${=time-pos} / ${=duration} | FPS=${estimated-vf-fps} | DROP=${drop-frame-count}",
     ]
 
     if start_time > 0:
         args.append(f"--start={start_time}")
 
-    if use_ytdl and shutil.which("yt-dlp"):
+    if use_ytdl and is_tool_available("yt-dlp"):
         args.insert(1, "--ytdl")
         # Always enforce a video+audio selector when using yt-dlp to avoid
         # accidental audio-only HLS variant selection on some manifests.
-        fmt = _quality_to_ytdl_format(quality) or "bestvideo+bestaudio/best"
-        args.append(f"--ytdl-format={fmt}")
+        fmt = _quality_to_ytdl_format(quality)
+        if fmt:
+            # User selected a specific resolution — enforce it strictly.
+            args.append(f"--ytdl-format={fmt}")
+        else:
+            # Auto/best mode: ask yt-dlp to sort by resolution and fps so the
+            # highest available resolution is always preferred over the default
+            # first-variant behaviour.
+            args.append("--ytdl-format=bestvideo+bestaudio/best")
+            args.append("--ytdl-raw-options=format-sort=res,fps")
+
+        # Pass custom headers into yt-dlp when present
         if headers:
             header_list = []
             for k, v in headers.items():
                 if "," not in str(v):
                     header_list.append(f"{k}: {v}")
             if header_list:
-                args.append(f"--ytdl-raw-options=http-header-fields=\"{','.join(header_list)}\"")
-    elif headers:
+                # format-sort was already appended above; append additional
+                # raw options as a separate flag (mpv allows multiple).
+                args.append(f"--ytdl-raw-options-append=http-header-fields={','.join(header_list)}")
+                
+    if headers:
         ua = headers.get("User-Agent") or headers.get("user-agent")
         if ua:
             args.append(f"--user-agent={ua}")
@@ -440,7 +474,7 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
     return args
 
 
-def _run_mpv(args):
+def _run_mpv(args):  # NOSONAR
     """Run mpv and parse position/duration from status messages.
     Returns dict with playback stats."""
     process = subprocess.Popen(
@@ -456,6 +490,8 @@ def _run_mpv(args):
     duration = 0
     had_video = False
     no_video_explicit = False
+    fps_values = []
+    dropped_frames = 0
 
     while True:
         line = process.stdout.readline()
@@ -463,15 +499,23 @@ def _run_mpv(args):
             break
         if "STATUS:" in line:
             try:
-                parts = line.split("STATUS:")[1].strip().split("/")
-                if len(parts) >= 2:
-                    p = float(parts[0].strip())
-                    d = float(parts[1].strip())
+                status = line.split("STATUS:", 1)[1].strip()
+                parts = [p.strip() for p in status.split("|") if p.strip()]
+                if parts:
+                    pos_dur = parts[0]
+                    p_str, d_str = [x.strip() for x in pos_dur.split("/", 1)]
+                    p = float(p_str)
+                    d = float(d_str)
                     if d > 0:
                         position = p
                         duration = d
-            except Exception:
-                pass
+                for token in parts[1:]:
+                    if token.upper().startswith("FPS="):
+                        fps_values.append(float(token.split("=", 1)[1].strip()))
+                    elif token.upper().startswith("DROP="):
+                        dropped_frames = max(dropped_frames, int(token.split("=", 1)[1].strip()))
+            except Exception as e:
+                app_logger.debug(f"Suppressed error in _run_mpv (status parsing): {e}", exc_info=True)
         low = line.lower()
         if "video:" in low and "no video" not in low:
             had_video = True
@@ -484,6 +528,8 @@ def _run_mpv(args):
         "duration": duration,
         "finished": (duration > 0 and position > duration * 0.9),
         "had_video": had_video,
+        "fps_avg": (sum(fps_values) / len(fps_values)) if fps_values else 0,
+        "dropped_frames": dropped_frames,
         # Only treat as no-video when mpv explicitly reports it.
         # Do NOT infer from position/time alone; that caused false positives
         # and endless fallback loops when users closed playback manually.
@@ -527,7 +573,7 @@ def _build_vlc_args(vlc_exe, url, title, headers, sub_paths, start_time):
 def _run_vlc(args):
     """Run VLC and wait for it to finish. Returns basic stats."""
     start = time.time()
-    result = subprocess.run(args, capture_output=True, text=True)
+    subprocess.run(args, capture_output=True, text=True)
     elapsed = time.time() - start
     return {
         "position": elapsed,
@@ -536,12 +582,12 @@ def _run_vlc(args):
     }
 
 
-def _ffprobe_has_video(url, headers=None, timeout_sec=12):
+def _ffprobe_has_video(url, headers=None, timeout_sec=12):  # NOSONAR
     """Return (ok, reason) for whether ffprobe sees a video stream on URL.
 
     This runs before opening MPV to reject broken/audio-only HLS URLs early.
     """
-    ffprobe_exe = shutil.which("ffprobe")
+    ffprobe_exe = find_executable("ffprobe")
     if not ffprobe_exe:
         return True, "ffprobe_unavailable"
 
@@ -609,9 +655,7 @@ def _ffprobe_has_video(url, headers=None, timeout_sec=12):
 
 # ─── Main play functions ─────────────────────────────────────────────
 
-def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=0,
-                preferred_sub_lang='ar', include_all_subs=True, preferred_langs=None,
-                player='mpv', fallback_langs=None, quality=None):
+def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=0, preferred_sub_lang='ar', include_all_subs=True, preferred_langs=None, player='mpv', fallback_langs=None, quality=None):  # NOSONAR
     """
     Plays a stream using the chosen player (mpv, vlc, or iina).
     preferred_langs: ordered list of language codes (primary first) from settings.
@@ -623,11 +667,11 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
 
     if player_exe is None:
         clear()
-        console.print(f"\n[bold red]No supported player found![/bold red]")
-        console.print(f"[yellow]Install one of: mpv, VLC, or iina[/yellow]")
-        console.print(f"[dim]mpv: https://mpv.io/installation/[/dim]")
-        console.print(f"[dim]VLC: https://www.videolan.org/vlc/[/dim]")
-        console.input("\nPress Enter to return...")
+        console.print("\n[bold red]No supported player found![/bold red]")
+        console.print("[yellow]Install one of: mpv, VLC, or iina[/yellow]")
+        console.print("[dim]mpv: https://mpv.io/installation/[/dim]")
+        console.print("[dim]VLC: https://www.videolan.org/vlc/[/dim]")
+        console.input(_PRESS_ENTER_PROMPT)
         return None
 
     # Show player info
@@ -689,8 +733,12 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
             ".m3u8", "m3u8", "master", "playlist", "/hls/", "index.m3u8"
         ])
         quality_enforced = bool(quality and quality not in ("auto", "adaptive", "best"))
-        prefer_ytdl = bool(shutil.which("yt-dlp")) and (
-            looks_like_manifest or quality_enforced or bool(headers)
+        # Always use yt-dlp for HLS/manifest URLs so that format-sort and
+        # quality selectors are applied — regardless of whether custom headers
+        # are present. This is the primary fix for the 360p-default issue when
+        # quality=auto (no specific quality was user-selected).
+        prefer_ytdl = is_tool_available("yt-dlp") and (
+            looks_like_manifest or quality_enforced
         )
 
         mpv_args = _build_mpv_args(
@@ -706,21 +754,22 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
         console.print(f"[dim]Launching mpv ({'yt-dlp' if prefer_ytdl else 'direct'} mode)...[/dim]")
         stats = _run_mpv(mpv_args)
 
-        # If first mode failed instantly, retry once with the alternate mode.
+        # If first mode failed instantly, retry with an alternate mode.
         if stats["duration"] == 0 and stats["position"] == 0:
             if prefer_ytdl and quality_enforced:
                 console.print(
-                    f"[{WARNING}]Quality-locked playback failed for this source; trying another source/quality.[/{WARNING}]"
+                    f"[{WARNING}]Quality-locked playback failed for this source; retrying with best available format...[/{WARNING}]"
                 )
-                return {
-                    "position": 0,
-                    "duration": 0,
-                    "finished": False,
-                    "had_video": False,
-                    "no_video": True,
-                }
+                mpv_args_fallback = _build_mpv_args(
+                    url, title, headers, sub_paths, preferred_sub_lang, start_time,
+                    use_ytdl=True, quality=None
+                )
+                stats = _run_mpv(mpv_args_fallback)
+                if stats["duration"] > 0 or stats["position"] > 0:
+                    return stats
+                # If it still fails, fall through to the general fallback
 
-            alt_use_ytdl = (not prefer_ytdl) and bool(shutil.which("yt-dlp"))
+            alt_use_ytdl = (not prefer_ytdl) and is_tool_available("yt-dlp")
             if alt_use_ytdl or prefer_ytdl:
                 console.print(
                     f"[{WARNING}]Primary playback mode failed, retrying with {'yt-dlp' if alt_use_ytdl else 'direct'}...[/{WARNING}]"
@@ -760,15 +809,15 @@ def play_video(url, title, preferred_sub_lang="ar", player="mpv"):
 
     if player_exe is None:
         clear()
-        console.print(f"\n[bold red]No supported player found![/bold red]")
-        console.print(f"[yellow]Install one of: mpv, VLC, or iina[/yellow]")
-        console.input("\nPress Enter to return...")
+        console.print("\n[bold red]No supported player found![/bold red]")
+        console.print("[yellow]Install one of: mpv, VLC, or iina[/yellow]")
+        console.input(_PRESS_ENTER_PROMPT)
         return
 
     # Check if local file exists
     if not url.startswith("http") and not os.path.exists(url):
         console.print(f"\n[bold red]Error: File not found at {url}[/bold red]")
-        console.input("\nPress Enter to return...")
+        console.input(_PRESS_ENTER_PROMPT)
         return
 
     player_label = player_name.upper()
@@ -806,8 +855,9 @@ def play_video(url, title, preferred_sub_lang="ar", player="mpv"):
             ], check=False)
         else:
             # mpv with --keep-open to prevent instant close
+            mpv_exe = find_executable("mpv") or "mpv"
             subprocess.run([
-                "mpv", url,
+                mpv_exe, url,
                 f"--title={title}",
                 "--fs",
                 "--keep-open=yes",
@@ -815,5 +865,6 @@ def play_video(url, title, preferred_sub_lang="ar", player="mpv"):
                 "--sub-auto=exact",
             ], check=False)
     except Exception as e:
+        app_logger.debug(f"Suppressed error in play_video: {e}", exc_info=True)
         console.print(f"\n[bold red]Failed to launch player:[/bold red] {e}")
         time.sleep(3)

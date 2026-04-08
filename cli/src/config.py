@@ -212,7 +212,7 @@ def apply_theme(theme_name: str) -> bool:
         "PRIMARY": PRIMARY, "SECONDARY": SECONDARY, "ACCENT": ACCENT,
         "SUCCESS": SUCCESS, "WARNING": WARNING, "TEXT": TEXT,
     }
-    for _mod in list(_sys.modules.values()):
+    for _mod in _sys.modules.values():
         try:
             for _name, _val in _colour_map.items():
                 if getattr(_mod, _name, None) is not None and isinstance(getattr(_mod, _name), str):

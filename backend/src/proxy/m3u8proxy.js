@@ -2,6 +2,7 @@
 import fetch from 'node-fetch';
 import https from 'https';
 import { DEFAULT_USER_AGENT } from './proxyserver.js';
+import { isAllowedStreamingUrl } from '../helpers/helper.js';
 
 const agent = new https.Agent({
   rejectUnauthorized: false,
@@ -9,7 +10,18 @@ const agent = new https.Agent({
 
 const shouldDebug = process.argv.includes('--debug');
 
+const AbortController = globalThis.AbortController;
+
 export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
+  if (!targetUrl || !isAllowedStreamingUrl(targetUrl)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden: URL not in streaming allowlist.' }));
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
   if (shouldDebug) {
     console.log(`[M3U8 Proxy] Fetching: ${targetUrl}`);
   }
@@ -20,7 +32,10 @@ export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
         ...headers,
       },
       agent,
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       console.error(
@@ -125,8 +140,14 @@ export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
     res.writeHead(200);
     res.end(processedContent);
   } catch (error) {
+    clearTimeout(timeoutId);
     console.error('[M3U8 Proxy Error]:', error.message, `for ${targetUrl.substring(0, 80)}...`);
-    res.writeHead(500);
-    res.end(`M3U8 Proxy error: ${error.message}`);
+    if (error.name === 'AbortError') {
+      res.writeHead(504, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Upstream timeout.' }));
+    } else {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Proxy fetch failed.' }));
+    }
   }
 }
