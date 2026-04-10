@@ -1,6 +1,36 @@
 import re
 
 
+def normalize_lang(l):
+    """Normalize language codes to 2-letter standard."""
+    l = (l or "").strip().lower()
+    if l in ["arabic", "ara", "ar", "arab"]:
+        return "ar"
+    if l in ["english", "eng", "en"]:
+        return "en"
+    if l in ["french", "fra", "fre", "fr"]:
+        return "fr"
+    if l in ["spanish", "spa", "es"]:
+        return "es"
+    if l in ["german", "deu", "ger", "de"]:
+        return "de"
+    if l in ["turkish", "tur", "tr"]:
+        return "tr"
+    if l in ["portuguese", "por", "pt"]:
+        return "pt"
+    if l in ["italian", "ita", "it"]:
+        return "it"
+    if l in ["chinese", "zho", "chi", "zh"]:
+        return "zh"
+    if l in ["japanese", "jpn", "ja"]:
+        return "ja"
+    if l in ["korean", "kor", "ko"]:
+        return "ko"
+    if l in ["hindi", "hin", "hi"]:
+        return "hi"
+    return l or "und"
+
+
 def sanitize_filename(name):
     """Sanitize string to be safe for filenames"""
     return (

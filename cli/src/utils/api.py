@@ -16,6 +16,9 @@ from urllib3.util.retry import Retry
 # Suppress SSL warnings for external API providers
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Global session for connection pooling
+_SHARED_SESSION = None
+
 # Provider reliability scores (higher = more reliable, updated based on success)
 PROVIDER_SCORES = {
     "vidsrc": 95,
@@ -32,6 +35,10 @@ PROVIDER_SCORES = {
 
 
 def create_session_with_retries():
+    global _SHARED_SESSION
+    if _SHARED_SESSION:
+        return _SHARED_SESSION
+
     session = requests.Session()
     retry_strategy = Retry(
         total=3,
@@ -51,7 +58,8 @@ def create_session_with_retries():
             "X-Client-Type": "cinema-cli",
         }
     )
-    return session
+    _SHARED_SESSION = session
+    return _SHARED_SESSION
 
 
 class APIClient:
@@ -217,109 +225,126 @@ class APIClient:
         
         last_error = None
         
-        for attempt in range(max_retries + 1):
-            if attempt > 0:
-                console.print(f"[dim]  Retry {attempt}/{max_retries}...[/dim]")
+        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-            for base in backend_bases:
-                try:
-                    if media_type == "movie":
-                        url = f"{base}/movie/{tmdb_id}"
-                    else:
-                        url = f"{base}/tv/{tmdb_id}?s={season}&e={episode}"
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+            transient=True
+        ) as progress:
+            task = progress.add_task("[cyan]Searching for sources...", total=(max_retries + 1) * len(backend_bases))
+            
+            for attempt in range(max_retries + 1):
+                if attempt > 0:
+                    progress.update(task, description=f"[cyan]Retry {attempt}/{max_retries}...")
 
-                    request_headers = {
-                        "X-Client-Type": "cinema-cli",
-                        "X-Correlation-Id": correlation_id,
-                    }
-                    params = None
-                    if force_refresh:
-                        request_headers["X-Bypass-Cache"] = "1"
-                        params = {"force_refresh": "1"}
+                for base in backend_bases:
+                    try:
+                        progress.update(task, description=f"[cyan]Scraping {base}...")
+                        if media_type == "movie":
+                            url = f"{base}/movie/{tmdb_id}"
+                        else:
+                            url = f"{base}/tv/{tmdb_id}?s={season}&e={episode}"
 
-                    # Add cache-busting for retries
-                    request_url = url
-                    if attempt > 0:
-                        separator = "&" if "?" in url else "?"
-                        request_url = f"{url}{separator}_retry={attempt}&_t={int(time.time())}"
+                        request_headers = {
+                            "X-Client-Type": "cinema-cli",
+                            "X-Correlation-Id": correlation_id,
+                        }
+                        params = None
+                        if force_refresh:
+                            request_headers["X-Bypass-Cache"] = "1"
+                            params = {"force_refresh": "1"}
 
-                    resp = self.session.get(
-                        request_url,
-                        timeout=self.timeout,
-                        headers=request_headers,
-                        params=params,
-                    )
+                        # Add cache-busting for retries
+                        request_url = url
+                        if attempt > 0:
+                            separator = "&" if "?" in url else "?"
+                            request_url = f"{url}{separator}_retry={attempt}&_t={int(time.time())}"
 
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data and (data.get("files") or isinstance(data, list)):
-                            # Normalize response format
-                            if isinstance(data, list):
-                                data = {
-                                    "files": data,
-                                    "subtitles": [],
-                                    "quality_groups": {},
-                                    "pipeline": {},
-                                }
-                            else:
-                                files = data.get("files")
-                                subtitles = data.get("subtitles")
-                                # Normalize files to list
-                                if isinstance(files, list):
-                                    normalized_files = files
-                                elif files:
-                                    normalized_files = [files]
+                        resp = self.session.get(
+                            request_url,
+                            timeout=self.timeout,
+                            headers=request_headers,
+                            params=params,
+                        )
+
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            
+                            # DEBUG LOG
+                            import json, sys
+                            print(f"[DEBUG api] raw subtitles from backend: {json.dumps(data.get('subtitles'), indent=2)}", file=sys.stderr)
+
+                            # Check for any valid content (files, subtitles or a list of files)
+                            if data and (data.get("files") or data.get("subtitles") or isinstance(data, list)):
+                                # Normalize response format
+                                if isinstance(data, list):
+                                    data = {
+                                        "files": data,
+                                        "subtitles": [],
+                                        "quality_groups": {},
+                                        "pipeline": {},
+                                    }
                                 else:
-                                    normalized_files = []
-                                # Normalize subtitles to list
-                                normalized_subs = subtitles if isinstance(subtitles, list) else []
-                                # Normalize dicts with fallback
-                                normalized_groups = data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {}
-                                normalized_pipeline = data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {}
-                                data = {
-                                    "files": normalized_files,
-                                    "subtitles": normalized_subs,
-                                    "quality_groups": normalized_groups,
-                                    "pipeline": normalized_pipeline,
-                                }
-                            # Persist the winning backend for the rest of this session
-                            self.settings["backend"] = base
-                            data["correlation_id"] = (
-                                resp.headers.get("x-correlation-id")
-                                or data.get("correlation_id")
-                                or correlation_id
-                            )
-                            data["backend_used"] = base
-                            log_event(
-                                "api",
-                                f"sources fetched ({media_type}:{tmdb_id}) files={len(data.get('files', []))}",
-                                correlation_id=data["correlation_id"],
-                            )
-                            return data
+                                    files = data.get("files")
+                                    subtitles = data.get("subtitles")
+                                    # Normalize files to list
+                                    normalized_files = files if isinstance(files, list) else ([files] if files else [])
+                                    # Normalize subtitles to list
+                                    normalized_subs = subtitles if isinstance(subtitles, list) else []
+                                    
+                                    data = {
+                                        "files": normalized_files,
+                                        "subtitles": normalized_subs,
+                                        "quality_groups": data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {},
+                                        "pipeline": data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {},
+                                    }
+                                # Persist the winning backend for the rest of this session
+                                self.settings["backend"] = base
+                                data["correlation_id"] = (
+                                    resp.headers.get("x-correlation-id")
+                                    or data.get("correlation_id")
+                                    or correlation_id
+                                )
+                                data["backend_used"] = base
+                                progress.update(task, completed=(max_retries + 1) * len(backend_bases))
+                                log_event(
+                                    "api",
+                                    f"sources fetched ({media_type}:{tmdb_id}) files={len(data.get('files', []))}",
+                                    correlation_id=data["correlation_id"],
+                                )
+                                return data
 
-                        # Empty response - backend might need time, retry
-                        if attempt < max_retries:
-                            jitter = random.uniform(0.5, 1.5)
-                            time.sleep(1 * (attempt + 1) * jitter)
-                            continue
+                            # Empty response - backend might need time, retry
+                            if attempt < max_retries:
+                                jitter = random.uniform(0.5, 1.5)
+                                time.sleep(1 * (attempt + 1) * jitter)
+                                progress.advance(task)
+                                continue
 
-                    elif resp.status_code in [429, 503, 504]:
-                        # Rate limited or server busy - wait and retry
-                        if attempt < max_retries:
-                            wait_time = 2 ** attempt + random.uniform(0, 1)
-                            console.print(f"[yellow]  Server busy, waiting {wait_time:.1f}s...[/yellow]")
-                            time.sleep(wait_time)
-                            continue
+                        elif resp.status_code in [429, 503, 504]:
+                            # Rate limited or server busy - wait and retry
+                            if attempt < max_retries:
+                                wait_time = 2 ** attempt + random.uniform(0, 1)
+                                progress.update(task, description=f"[yellow]Server busy, waiting {wait_time:.1f}s...")
+                                time.sleep(wait_time)
+                                progress.advance(task)
+                                continue
 
-                    else:
-                        last_error = f"HTTP {resp.status_code}"
+                        else:
+                            last_error = f"HTTP {resp.status_code}"
 
-                except requests.exceptions.Timeout:
-                    last_error = "Timeout"
-                except requests.exceptions.ConnectionError:
-                    last_error = "Connection error"
-                except Exception as e:
-                    last_error = str(e)
+                    except requests.exceptions.Timeout:
+                        last_error = "Timeout"
+                    except requests.exceptions.ConnectionError:
+                        last_error = "Connection error"
+                    except Exception as e:
+                        last_error = str(e)
+                    
+                    progress.advance(task)
 
             if attempt < max_retries:
                 # brief backoff before trying all backends again

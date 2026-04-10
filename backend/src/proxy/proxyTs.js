@@ -20,7 +20,7 @@ export async function proxyTs(targetUrl, headers, req, res) {
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   const start = Date.now();
   if (shouldDebug) {

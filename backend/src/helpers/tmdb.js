@@ -1,3 +1,4 @@
+import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import path from 'path';
 import { strings } from '../strings.js';
@@ -17,12 +18,6 @@ const apiKey = process.env.TMDB_API_KEY;
  * Fetches movie information from TMDB API using the movie ID
  * @param {string|number} tmdb_id - The TMDB ID of the movie
  * @returns {Promise<Object|ErrorObject>} Object containing movie information or Error if any part of the request fails
- * @property {string} type - Always "movie"
- * @property {string} title - Original title of the movie
- * @property {string} name - Original title of the movie
- * @property {number} releaseYear - Year the movie was released
- * @property {string|number} tmdb - TMDB ID of the movie
- * @property {string} imdb - IMDB ID of the movie
  */
 export async function getMovieFromTmdb(tmdb_id) {
   try {
@@ -69,7 +64,8 @@ export async function getMovieFromTmdb(tmdb_id) {
       type: 'movie',
       title: data.original_title,
       name: data.original_title,
-      releaseYear: Number(data.release_date.split('-')[0]),
+      year: data.release_date ? data.release_date.split('-')[0] : '',
+      releaseYear: data.release_date ? data.release_date.split('-')[0] : '',
       tmdb: tmdb_id,
       imdb: secondData.imdb_id,
     };
@@ -84,14 +80,6 @@ export async function getMovieFromTmdb(tmdb_id) {
  * @param {string|number} season - Season number
  * @param {string|number} episode - Episode number
  * @returns {Promise<Object|ErrorObject>} Object containing episode information or Error if any part of the request fails
- * @property {string} type - Always "tv"
- * @property {string|number} releaseYear - Year the episode was aired
- * @property {string|number} tmdb - TMDB ID of the show (duplicate)
- * @property {string} imdb - IMDB ID of the show (duplicate)
- * @property {string|number} season - Season number
- * @property {string|number} episode - Episode number
- * @property {string|number} episodeid - Episode number (duplicate)
- * @property {string} episodeName - Name of the episode
  */
 export async function getTvFromTmdb(tmdb_id, season, episode) {
   try {
@@ -149,8 +137,10 @@ export async function getTvFromTmdb(tmdb_id, season, episode) {
 
     return {
       type: 'tv',
+      title: title,
       name: title,
-      releaseYear: data.air_date.split('-')[0],
+      year: data.air_date ? data.air_date.split('-')[0] : '',
+      releaseYear: data.air_date ? data.air_date.split('-')[0] : '',
       tmdb: tmdb_id,
       imdb: thirdData.imdb_id,
       season: season,

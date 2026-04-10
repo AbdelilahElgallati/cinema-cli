@@ -6,7 +6,7 @@ import cors from 'cors';
 import { strings } from './src/strings.js';
 import { checkIfPossibleTmdbId, handleErrorResponse } from './src/helpers/helper.js';
 import { ErrorObject } from './src/helpers/ErrorObject.js';
-import { getCacheStats } from './src/cache/cache.js';
+import { getCacheStats, getCacheKey, cache } from './src/cache/cache.js';
 import { startup } from './src/utils/startup.js';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
@@ -30,23 +30,24 @@ function getCorrelationId(req) {
   return `backend-${crypto.randomBytes(6).toString('hex')}`;
 }
 
-// Restrict CORS to localhost only to prevent cross-site request abuse
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (e.g., CLI tools, curl) or from localhost
-      if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('CORS: origin not allowed'));
-      }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  })
-);
+// Robust CORS for all clients including CLI players
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Client-Type', 'X-Correlation-Id', 'X-Bypass-Cache', 'Range'],
+  exposedHeaders: ['Content-Range', 'X-Correlation-Id'],
+  maxAge: 86400
+}));
 
 createProxyRoutes(app);
+
+// Add a helper to clear cache entry
+function clearCacheEntry(media) {
+  const key = getCacheKey(media);
+  if (cache.has(key)) {
+    cache.del(key);
+  }
+}
 
 app.get('/', (req, res) => {
   res.status(200).json({
@@ -89,6 +90,8 @@ app.get('/movie/:tmdbId', async (req, res) => {
     req.headers['x-bypass-cache'] === '1' ||
     req.headers['x-bypass-cache'] === 'true';
 
+  if (forceRefresh) clearCacheEntry(media);
+
   const output = await scrapeMedia(media, { forceRefresh, correlationId });
   if (output instanceof ErrorObject) {
     return handleErrorResponse(res, output);
@@ -125,6 +128,8 @@ app.get('/tv/:tmdbId', async (req, res) => {
     req.query.refresh === 'true' ||
     req.headers['x-bypass-cache'] === '1' ||
     req.headers['x-bypass-cache'] === 'true';
+
+  if (forceRefresh) clearCacheEntry(media);
 
   const output = await scrapeMedia(media, { forceRefresh, correlationId });
   if (output instanceof ErrorObject) {
@@ -167,7 +172,17 @@ app.get('/cache-stats', (req, res) => {
   });
 });
 
-app.get('/{*any}', (req, res) => {
+// Health check endpoint for CLI startup probe
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', version: '1.0.2' });
+});
+
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
+// 404 Handler - Catch all unmatched routes
+app.use((req, res) => {
   handleErrorResponse(
     res,
     new ErrorObject(strings.ROUTE_NOT_FOUND, 'user', 404, strings.ROUTE_NOT_FOUND_HINT, true, false)

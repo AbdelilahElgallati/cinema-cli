@@ -34,8 +34,15 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
     def _is_running(url: str) -> bool:
         for probe_url in _probe_urls(url):
             try:
-                req = Request(probe_url, headers={"User-Agent": USER_AGENT})
-                with urlopen(req, timeout=1) as resp:
+                req = Request(
+                    probe_url, 
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Connection": "close",
+                        "Accept": "*/*"
+                    }
+                )
+                with urlopen(req, timeout=2) as resp:
                     if 200 <= int(getattr(resp, "status", 0)) < 400:
                         return True
             except Exception as e:
@@ -148,7 +155,7 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
     with console.status("Starting backend, please wait...", spinner="dots"):
         waited = 0.0
         interval = 0.5
-        while waited < timeout:
+        while waited < 60:
             if _is_running(backend_url):
                 if stop_tailer:
                     stop_tailer.set()
@@ -175,11 +182,14 @@ from prompt_toolkit.styles import Style
 
 from rich import box
 from rich.align import Align
+from rich.columns import Columns
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
@@ -931,6 +941,52 @@ class CinemaCLI:
             except Exception:
                 pass
 
+    def print_dashboard(self):
+        """Render a stunning, professional dashboard with stats and system status."""
+        clear()
+        
+        # 1. System Status Panel
+        status_color = SUCCESS if self.backend_online else "bold red"
+        status_label = "● ONLINE" if self.backend_online else "○ OFFLINE"
+        
+        # 2. Stats Columns
+        stats_table = Table.grid(expand=True)
+        stats_table.add_column(justify="left", ratio=1)
+        stats_table.add_column(justify="center", ratio=1)
+        stats_table.add_column(justify="right", ratio=1)
+        
+        stats_table.add_row(
+            Text.from_markup(f"[bold {PRIMARY}]⭐ Favorites:[/] {len(self.favorites)}"),
+            Text.from_markup(f"[bold {PRIMARY}]🕒 History:[/] {len(self.history)}"),
+            Text.from_markup(f"[bold {PRIMARY}]⏱️  Later:[/] {len(self.watch_later)}")
+        )
+
+        # 3. Active Downloads Info
+        active_tasks = [t for t in self.download_manager.get_queue() if t["status"] in ("downloading", "muxing", "pending")]
+        dl_text = f"[bold {ACCENT}]📥 Active Downloads:[/] {len(active_tasks)}" if active_tasks else f"[dim]No active downloads[/dim]"
+
+        # Build Top Banner
+        header = Text.from_markup(f"🎬 [bold {PRIMARY}]CINEMA CLI[/] [dim {TEXT}]v{APP_VERSION}[/]")
+        
+        top_panel = Panel(
+            Group(
+                Align.center(header),
+                Rule(style=f"dim {PRIMARY}"),
+                stats_table,
+                Rule(style="dim"),
+                Columns([
+                    Text.from_markup(f"[{status_color}]{status_label}[/] [dim]│[/] {self.settings.get('backend', BACKEND_URL)}"),
+                    Align.right(Text.from_markup(dl_text))
+                ], expand=True)
+            ),
+            border_style=PRIMARY,
+            box=box.ROUNDED,
+            padding=(0, 2)
+        )
+        
+        console.print(top_panel)
+        console.print()
+
     def main_menu(self):
         # Import the active theme's highlight colour once
         try:
@@ -942,20 +998,22 @@ class CinemaCLI:
             _hl_fg = "#FFFFFF"
 
         while True:
-            print_header("Main Menu")
+            self.backend_online = self._check_backend_online()
+            self.print_dashboard()
+            
             options = [
-                {"name": "🔍 Search Movies & TV",   "action": self.handle_search},
-                {"name": "🌍 Discovery",            "action": self.handle_discovery},
-                {"name": "📈 Trending This Week",   "action": self.handle_trending},
-                {"name": "🔥 Popular Content",      "action": self.handle_popular},
-                {"name": "🎭 Browse by Genre",      "action": self.handle_genres},
-                {"name": "⭐ My Favorites",         "action": self.handle_favorites},
-                {"name": "🕒 Watch History",        "action": self.handle_history},
-                {"name": "⏱️  Watch Later",          "action": self.handle_watch_later},
-                {"name": "📁 Local Library",        "action": self.handle_local_library},
-                {"name": "📥 Download Manager",     "action": self.handle_download_manager},
-                {"name": "⚙️  Settings",            "action": self.handle_settings},
-                {"name": "❌ Exit",                 "action": sys.exit},
+                {"name": "🔍 Search Movies & TV",   "action": self.handle_search, "icon": "🔍"},
+                {"name": "🌍 Discovery",            "action": self.handle_discovery, "icon": "🌍"},
+                {"name": "📈 Trending This Week",   "action": self.handle_trending, "icon": "📈"},
+                {"name": "🔥 Popular Content",      "action": self.handle_popular, "icon": "🔥"},
+                {"name": "🎭 Browse by Genre",      "action": self.handle_genres, "icon": "🎭"},
+                {"name": "⭐ My Favorites",         "action": self.handle_favorites, "icon": "⭐"},
+                {"name": "🕒 Watch History",        "action": self.handle_history, "icon": "🕒"},
+                {"name": "⏱️  Watch Later",          "action": self.handle_watch_later, "icon": "⏱️ "},
+                {"name": "📁 Local Library",        "action": self.handle_local_library, "icon": "📁"},
+                {"name": "📥 Download Manager",     "action": self.handle_download_manager, "icon": "📥"},
+                {"name": "⚙️  Settings",            "action": self.handle_settings, "icon": "⚙️ "},
+                {"name": "❌ Exit",                 "action": sys.exit, "icon": "❌"},
             ]
 
             selected_index = 0
@@ -973,28 +1031,6 @@ class CinemaCLI:
                 nonlocal selected_index
                 selected_index = (selected_index + 1) % len(opts)
 
-            @kb.add("pageup")
-            def _(event, opts=options):
-                nonlocal selected_index
-                selected_index = max(0, selected_index - 5)
-
-            @kb.add("pagedown")
-            def _(event, opts=options):
-                nonlocal selected_index
-                selected_index = min(len(opts) - 1, selected_index + 5)
-
-            @kb.add("home")
-            @kb.add("g")
-            def _(event, opts=options):
-                nonlocal selected_index
-                selected_index = 0
-
-            @kb.add("end")
-            @kb.add("G")
-            def _(event, opts=options):
-                nonlocal selected_index
-                selected_index = len(opts) - 1
-
             @kb.add("enter")
             def _(event, opts=options):  # NOSONAR
                 event.app.exit(result=opts[selected_index]["action"])  # NOSONAR
@@ -1003,23 +1039,18 @@ class CinemaCLI:
             def _(event):
                 event.app.exit(result=sys.exit)
 
-            @kb.add("b")
-            def _(event):
-                event.app.exit(result=None)
-
             def get_menu_text(opts=options):  # NOSONAR
                 res = []
-                res.append(("class:header", "  ╭── Main Menu ──╮\n"))
-                if not self.backend_online:
-                    res.append(("class:offline", "  ⚠  OFFLINE — Browse/Search disabled  \n"))
+                res.append(("class:header", "  ╭── Select an option ──╮\n"))
                 res.append(("class:border", "  " + "─" * 36 + "\n"))
                 for i, opt in enumerate(opts):
+                    name = opt['name']
                     if i == selected_index:  # NOSONAR
-                        res.append(("class:selected", f"  ▶  {opt['name']}\n"))
+                        res.append(("class:selected", f"  ▶  {name}\n"))
                     else:
-                        res.append(("class:item", f"     {opt['name']}\n"))
+                        res.append(("class:item", f"     {name}\n"))
                 res.append(("class:border", "  " + "─" * 36 + "\n"))
-                res.append(("class:help", "  ↑↓/j/k Navigate   Enter Select   Q Quit  "))
+                res.append(("class:help", "  ↑↓ Navigate   Enter Select   Q Quit  "))
                 return res
 
             style = Style.from_dict(
@@ -1029,7 +1060,6 @@ class CinemaCLI:
                     "selected": f"bg:{PRIMARY} fg:{_hl_fg} bold",
                     "item":     f"{TEXT}",
                     "help":     f"italic dim {TEXT}",
-                    "offline":  "bold fg:ansired",
                 }
             )
 
@@ -1037,6 +1067,7 @@ class CinemaCLI:
                 layout=PTLayout(Window(FormattedTextControl(get_menu_text))),
                 key_bindings=kb,
                 style=style,
+                full_screen=False, # Persistent dashboard above
             )
             action = app.run()
             if action:
@@ -2063,7 +2094,7 @@ class CinemaCLI:
                 while True:
                     title = f"{media.get('name')} S{s_num}E{ep['episode_number']} - {ep.get('name')}"
                     
-                    # Use enhanced source fetching for TV episodes
+                    # Fetch sources ONCE here
                     console.print(f"[bold {ACCENT}]Fetching sources for: {title}...[/bold {ACCENT}]")
                     data = self.api.get_sources_enhanced(
                         media["id"], "tv", s_num, ep["episode_number"], min_sources=3
@@ -2081,6 +2112,7 @@ class CinemaCLI:
                         "runtime": ep.get("runtime"),
                     }
 
+                    # Pass the 'data' directly to handle_sources
                     if next_step_auto:
                         stats = self.handle_sources(title, data, meta, autoplay=True)
                         next_step_auto = False
@@ -2796,9 +2828,10 @@ class CinemaCLI:
             # Get multiple working sources for fallback
             working_sources = select_multiple_working_sources(filtered_files, count=3)
             
-            if not working_sources:
-                # Try fetching fresh sources
-                console.print("[yellow]No working sources, trying fresh fetch...[/yellow]")
+            # If no subtitles found and we are in a normal run, try to force refresh
+            # This handles the case where the backend has a stale cache with 0 subtitles
+            if not subtitles and not autoplay:
+                console.print("[dim]  No subtitles in cache, requesting fresh scrape...[/dim]")
                 if meta and meta.get("tmdb_id"):
                     fresh_data = self.api.get_sources_api(
                         meta["tmdb_id"], 
@@ -2807,11 +2840,14 @@ class CinemaCLI:
                         meta.get("episode"),
                         force_refresh=True
                     )
-                    if fresh_data and fresh_data.get("files"):
-                        fresh_files = fresh_data["files"]
-                        fresh_files, _fresh_mode = filter_sources_for_quality(fresh_files, selected_quality)
-                        filtered_files = fresh_files if fresh_files else filtered_files
-                        working_sources = select_multiple_working_sources(fresh_files, count=3) if fresh_files else []
+                    if fresh_data:
+                        subtitles = fresh_data.get("subtitles", [])
+                        if fresh_data.get("files"):
+                            fresh_files = fresh_data["files"]
+                            fresh_files, _fresh_mode = filter_sources_for_quality(fresh_files, selected_quality)
+                            if fresh_files:
+                                filtered_files = fresh_files
+                                working_sources = select_multiple_working_sources(fresh_files, count=3)
             
             if not working_sources:
                 console.print(f"[bold red]No working source found for: {title}[/bold red]")
@@ -2848,7 +2884,7 @@ class CinemaCLI:
                         preferred_langs=_play_pref_langs,
                         player=self.settings.get("preferred_player", "mpv"),
                         fallback_langs=self.settings.get('fallback_subtitle_langs', ['ar','en']),
-                        quality=selected_quality if (_quality_mode == "enforced_manifest" and selected_quality not in ("auto", "adaptive")) else None,
+                        quality=selected_quality if selected_quality not in ("auto", "adaptive", "best") else None,
                     )
 
                     instant_fail = (
@@ -3712,7 +3748,7 @@ if __name__ == "__main__":
     if _needs_backend:
         _boot_settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
         _backend_url = _boot_settings.get("backend") or os.getenv("BACKEND_URL") or BACKEND_URL
-        start_local_backend(_backend_url, timeout=30)
+        start_local_backend(_backend_url, timeout=60)
 
     if "--debug-source" in _argv:
         sys.exit(run_debug_source_command(_argv))
@@ -3727,7 +3763,7 @@ if __name__ == "__main__":
     # Prefer user settings backend URL, then env/default config.
     _boot_settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
     _backend_url = _boot_settings.get("backend") or os.getenv("BACKEND_URL") or BACKEND_URL
-    start_local_backend(_backend_url, timeout=30)
+    start_local_backend(_backend_url, timeout=60)
 
     cli = CinemaCLI()
     try:

@@ -1,3 +1,4 @@
+import fetch from 'node-fetch';
 import { languageMap } from '../../../utils/languages.js';
 import { generateVRF } from './vrfgen.js';
 import { ErrorObject } from '../../../helpers/ErrorObject.js';
@@ -61,10 +62,10 @@ export async function getVidSrcCC(media) {
   let firstUrl;
 
   if (media.type !== 'tv') {
-    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=movie&v=${v}&vrf=${vrfToken}&imdbId=${media.imdbId}`;
+    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=movie&v=${v}&vrf=${vrfToken}&imdbId=${media.imdb}`;
     origin = `${DOMAIN.replace('api/', '')}embed/movie/${media.tmdb}`;
   } else {
-    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=tv&v=${v}&vrf=${vrfToken}&season=${media.season}&episode=${media.episode}&imdbId=${media.imdbId}`;
+    firstUrl = `${DOMAIN}${media.tmdb}/servers?id=${media.tmdb}&type=tv&v=${v}&vrf=${vrfToken}&season=${media.season}&episode=${media.episode}&imdbId=${media.imdb}`;
     origin = `${DOMAIN.replace('api/', '')}embed/tv/${media.tmdb}/${media.season}/${media.episode}`;
   }
 
@@ -123,10 +124,12 @@ export async function getVidSrcCC(media) {
   for (let source of vidsrcCCSources) {
     if (source.subtitles) {
       source.subtitles.forEach((subtitle) => {
-        subtitles.push({
-          lang: languageMap[subtitle.label.split(' ')[0]] || subtitle.lang,
-          url: subtitle.file,
-        });
+        if (subtitle.file && subtitle.file.includes('http')) {
+          subtitles.push({
+            lang: languageMap[subtitle.label.split(' ')[0]] || subtitle.lang,
+            url: subtitle.file,
+          });
+        }
       });
     }
   }
@@ -153,7 +156,8 @@ export async function getVidSrcCC(media) {
     subtitles: subtitles.map((subtitle) => ({
       url: subtitle.url,
       lang: subtitle.lang,
-      type: subtitle.url.split('.').pop(),
+      type: subtitle.url ? subtitle.url.split('.').pop() : 'srt',
     })),
   };
 }
+

@@ -18,6 +18,7 @@ if not os.getenv("TMDB_API_KEY") or not os.getenv("BACKEND_URL"):
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3010")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 OPENSUBTITLES_API_KEY = os.getenv("OPENSUBTITLES_API_KEY", "")
+SUBDL_API_KEY = os.getenv("SUBDL_API_KEY", "")
 
 APP_VERSION = "2.0.0"
 

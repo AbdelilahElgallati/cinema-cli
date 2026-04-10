@@ -635,7 +635,7 @@ class DownloadManager:
                     if last not in langs:
                         langs.append(last)
 
-                subs_found = fetch_subtitles(task.get("title") or "", langs, year=yr, season=sn, episode=epn)
+                subs_found = fetch_subtitles(task.get("title") or "", langs, year=yr, season=sn, episode=epn, max_per_language=3)
                 if subs_found:
                     base, _ = os.path.splitext(task.get("filename") or task.get("title") or "video")
                     base = os.path.basename(base)
