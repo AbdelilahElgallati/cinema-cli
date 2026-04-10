@@ -117,6 +117,7 @@ def _write_env(values: dict[str, str]):
         "PORT",
         "BACKEND_URL",
         "OPENSUBTITLES_API_KEY",
+        "SUBDL_API_KEY",
         "DISABLE_CACHE",
     ]
     lines = []
@@ -150,7 +151,7 @@ def _banner(title: str):
 # ── Individual steps ──────────────────────────────────────────────────────────
 
 def _step_python():
-    _banner("Step 1 / 7 — Python version")
+    _banner("Step 1 / 8 — Python version")
     major, minor = sys.version_info[:2]
     if (major, minor) >= (3, 9):
         _print(f"[green]✓  Python {major}.{minor} — OK[/green]")
@@ -187,7 +188,7 @@ def _auto_install_tools(tools_to_install: list[str]) -> bool:
 
 
 def _step_tools() -> dict[str, bool]:  # NOSONAR
-    _banner("Step 2 / 7 — External tools")
+    _banner("Step 2 / 8 — External tools")
 
     tools = [
         ("mpv",    True,  "Required for video playback"),
@@ -252,7 +253,7 @@ def _step_tools() -> dict[str, bool]:  # NOSONAR
 
 
 def _step_tmdb_key():
-    _banner("Step 3 / 7 — TMDB API key")
+    _banner("Step 3 / 8 — TMDB API key")
     _print(
         "  Cinema CLI uses The Movie Database (TMDB) for movie/TV metadata.\n"
         "  Get a free API key at: [bold cyan]https://www.themoviedb.org/settings/api[/bold cyan]\n"
@@ -279,7 +280,7 @@ def _step_tmdb_key():
 
 
 def _step_opensubs_key():
-    _banner("Step 4 / 7 — OpenSubtitles API key  (optional)")
+    _banner("Step 4 / 8 — OpenSubtitles API key  (optional)")
     _print(
         "  OpenSubtitles provides fallback subtitles when a source has none.\n"
         "  Get a free API key at: [bold cyan]https://www.opensubtitles.com/consumers[/bold cyan]\n"
@@ -302,8 +303,32 @@ def _step_opensubs_key():
     return key
 
 
+def _step_subdl_key():
+    _banner("Step 5 / 8 — SubDL API key (optional)")
+    _print(
+        "  SubDL is an excellent alternative for Arabic and international subtitles.\n"
+        "  Get a free API key at: [bold cyan]https://subdl.com[/bold cyan]\n"
+        "  (Create account → Check your profile for the API key)\n"
+    )
+
+    existing = _load_env_key("SUBDL_API_KEY")
+    if existing and len(existing) > 5:
+        _print(f"[green]✓  SubDL key already configured: {existing[:8]}…[/green]")
+        change = _input("  Replace it? (y/N): ").strip().lower()
+        if change not in ("y", "yes"):
+            return existing
+
+    key = _input("  Paste your SubDL API key (or press Enter to skip): ").strip()
+    if key:
+        _write_env({"SUBDL_API_KEY": key})
+        _print("[green]  ✓  SubDL key saved.[/green]")
+    else:
+        _print("[dim]  Skipped — you can add SUBDL_API_KEY to .env later.[/dim]")
+    return key
+
+
 def _step_backend_config() -> tuple[int, str]:
-    _banner("Step 5 / 7 — Backend configuration")
+    _banner("Step 6 / 8 — Backend configuration")
 
     existing_port = _load_env_key("PORT")
     existing_url = _load_env_key("BACKEND_URL")
@@ -327,7 +352,7 @@ def _step_backend_config() -> tuple[int, str]:
 
 
 def _step_download_dir() -> str:
-    _banner("Step 6 / 7 — Download directory")
+    _banner("Step 7 / 8 — Download directory")
     default = str(Path.home() / "Downloads" / "CinemaCLI")
     _print(f"  Where should Cinema CLI save downloaded movies and episodes?\n"
            f"  [dim]Default: {default}[/dim]\n")
@@ -344,7 +369,7 @@ def _step_download_dir() -> str:
 
 
 def _step_theme() -> str:
-    _banner("Step 7 / 7 — Theme")
+    _banner("Step 8 / 8 — Theme")
     themes = ["cinema", "blue", "purple", "green", "gold", "teal", "rose", "sunset", "mint"]
     _print("  Available themes:")
     for i, t in enumerate(themes, 1):
@@ -425,6 +450,7 @@ def run_wizard(force: bool = False):
         _step_tools()
         tmdb_key   = _step_tmdb_key()
         opensubs_key = _step_opensubs_key()
+        subdl_key = _step_subdl_key()
         port, backend_url = _step_backend_config()
         dl_dir     = _step_download_dir()
         theme      = _step_theme()
@@ -435,6 +461,7 @@ def run_wizard(force: bool = False):
                 "PORT": str(port),
                 "BACKEND_URL": backend_url,
                 "OPENSUBTITLES_API_KEY": opensubs_key or _load_env_key("OPENSUBTITLES_API_KEY"),
+                "SUBDL_API_KEY": subdl_key or _load_env_key("SUBDL_API_KEY"),
                 "DISABLE_CACHE": _load_env_key("DISABLE_CACHE") or "false",
             }
         )

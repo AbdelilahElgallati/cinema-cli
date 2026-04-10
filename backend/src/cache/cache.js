@@ -2,7 +2,7 @@ import NodeCache from 'node-cache';
 
 // Here comes the big boy to loook for nothing okay here you go if you do something you better do it right
 // Setting up cache for 3 hours because lowkey's attention span is short
-const cache = new NodeCache({ stdTTL: 10800, checkperiod: 600 });
+export const cache = new NodeCache({ stdTTL: 10800, checkperiod: 600 });
 
 export function getCacheKey(media) {
   // TV shows need season and episode info, movies just need the basic ID

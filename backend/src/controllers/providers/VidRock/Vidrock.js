@@ -87,24 +87,29 @@ export async function getVidRock(media) {
     if (shouldDebug) {
       console.log('[getVidRock] Response OK, parsing JSON');
     }
-    sources = await sources.json();
+    const rawResponse = await sources.json();
     if (shouldDebug) {
-      console.log('[getVidRock] Parsed JSON response:', JSON.stringify(sources, null, 2));
+      console.log('[getVidRock] Raw JSON keys:', Object.keys(rawResponse));
     }
 
-    if (Object.keys(sources).length === 0) {
-      return new ErrorObject(
-        'No sources found',
-        'Vidrock',
-        404,
-        'No sources were returned by the API. Ensure the media exists or the API is functioning correctly.',
-        true,
-        true
-      );
+    // Extract subtitles first, as they might be a key in the raw response
+    const subtitles = [];
+    if (rawResponse.subtitles && Array.isArray(rawResponse.subtitles)) {
+      if (shouldDebug) console.log(`[getVidRock] Found ${rawResponse.subtitles.length} subtitles in response`);
+      rawResponse.subtitles.forEach((sub) => {
+        if (sub.url && sub.language) {
+          subtitles.push({
+            url: sub.url,
+            lang: languageMap[sub.language] || sub.language,
+            label: sub.language,
+            type: sub.url.split('.').pop() || 'srt',
+          });
+        }
+      });
     }
 
-    const formattedSources = Object.values(sources)
-      .filter((source) => source && source.url)
+    const formattedSources = Object.values(rawResponse)
+      .filter((source) => source && source.url && typeof source.url === 'string')
       .map((source) => ({
         file: source.url,
         type: source.url.includes('.m3u8')
@@ -134,7 +139,7 @@ export async function getVidRock(media) {
 
     return {
       files: formattedSources,
-      subtitles: [],
+      subtitles: subtitles,
     };
   } catch (error) {
     return new ErrorObject(

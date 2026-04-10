@@ -60,8 +60,9 @@ function normalizeSubtitle(sub) {
   const url = typeof sub.url === 'string' ? sub.url : null;
   if (!url) return null;
   const lang = String(sub.lang || sub.language || 'und').toLowerCase();
+  const label = sub.label || sub.language || sub.lang || 'Unknown';
   const type = String(sub.type || (url.toLowerCase().includes('.vtt') ? 'vtt' : 'srt')).toLowerCase();
-  return { url, lang, type };
+  return { url, lang, label, type };
 }
 
 function sourceIdFor(file, provider) {
@@ -279,6 +280,15 @@ function scoreSource(src, providerStat) {
   return score;
 }
 
+async function batch(items, fn, limit = 5) {
+  const results = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const chunk = items.slice(i, i + limit);
+    results.push(...(await Promise.all(chunk.map(fn))));
+  }
+  return results;
+}
+
 export async function runSourcePipeline(rawProviderResults, options = {}) {
   const startedAt = Date.now();
   const stageDurations = {};
@@ -321,14 +331,16 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     }
   }
 
+  if (process.argv.includes('--debug')) {
+    console.log(`[Pipeline] Collected ${normalizedSources.length} files and ${normalizedSubs.length} subtitles from providers`);
+  }
+
   stageDurations.collect_ms = Date.now() - tCollectStart;
 
   const tNormalizeStart = Date.now();
-  const expandedSources = [];
-  for (const s of normalizedSources) {
-    const expanded = await expandHlsVariants(s);
-    expandedSources.push(...expanded);
-  }
+  // Parallelize HLS expansion with concurrency limit
+  const expandedResults = await batch(normalizedSources, (s) => expandHlsVariants(s), 8);
+  const expandedSources = expandedResults.flat();
 
   const deduped = [];
   const seen = new Set();
@@ -343,18 +355,34 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
 
   const probeEnabled = options.probe !== false;
   const tProbeStart = Date.now();
-  for (const src of deduped) {
-    if (probeEnabled) {
-      src.probe_result = await probeSource(src);
-    }
 
+  // Parallelize probing with a concurrency limit
+  if (probeEnabled) {
+    await batch(
+      deduped,
+      async (src) => {
+        src.probe_result = await probeSource(src);
+      },
+      12
+    );
+  }
+
+  // Update stats and scores after all probes are done
+  for (const src of deduped) {
     const ps = providersStats[src.provider] || {};
     src.score = scoreSource(src, ps);
 
-    if (!providersStats[src.provider]) providersStats[src.provider] = { success: 0, no_video: 0, timeout: 0 };
-    if (src.probe_result.status === 'ok') providersStats[src.provider].success += 1;
-    if (src.probe_result.status === 'no_video') providersStats[src.provider].no_video += 1;
-    if (src.probe_result.status === 'timeout') providersStats[src.provider].timeout += 1;
+    if (!providersStats[src.provider]) {
+      providersStats[src.provider] = { success: 0, no_video: 0, timeout: 0 };
+    }
+    
+    if (src.probe_result.status === 'ok') {
+      providersStats[src.provider].success += 1;
+    } else if (src.probe_result.status === 'no_video') {
+      providersStats[src.provider].no_video += 1;
+    } else if (src.probe_result.status === 'timeout') {
+      providersStats[src.provider].timeout += 1;
+    }
   }
 
   stageDurations.probe_ms = Date.now() - tProbeStart;
@@ -384,6 +412,10 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     subtitles.push(sub);
   }
 
+  if (process.argv.includes('--debug')) {
+    console.log(`[Pipeline] Final subtitle count: ${subtitles.length}`);
+  }
+
   return {
     files: ranked,
     subtitles,
@@ -395,6 +427,7 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
       totals: {
         input: normalizedSources.length,
         output: ranked.length,
+        subtitles: subtitles.length,
       },
       total_ms: Date.now() - startedAt,
     },

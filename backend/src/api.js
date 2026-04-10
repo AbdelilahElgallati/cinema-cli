@@ -81,16 +81,22 @@ export async function scrapeMedia(media, options = {}) {
       const providerName = Object.keys(provider)[0];
 
       const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Timeout')), 15000)
+        setTimeout(() => reject(new Error('Timeout after 30s')), 30000)
       );
 
       try {
+        const data = await Promise.race([provider[providerName](), timeout]);
+        if (data) {
+          console.log(`[${providerName}] Succeeded. Files: ${data.files?.length || 0}, Subtitles: ${data.subtitles?.length || 0}`);
+        } else {
+          console.log(`[${providerName}] Returned null or empty data`);
+        }
         return {
-          data: await Promise.race([provider[providerName](), timeout]),
+          data: data,
           provider: providerName,
         };
       } catch (e) {
-        if (shouldDebug) console.error(`[${providerName}] Failed: ${e.message}`);
+        console.error(`[${providerName}] Failed: ${e.message}`);
         return { data: null, provider: providerName };
       }
     })
@@ -106,12 +112,7 @@ export async function scrapeMedia(media, options = {}) {
     correlationId: options.correlationId,
   });
 
-  // Keep existing validator as a final HTTP-level filter in non-debug mode.
-  let files = pipelineResult.files || [];
-  if (files.length > 0 && !shouldDebug) {
-    files = await validateSources(files, 20, 2500);
-  }
-
+  const files = pipelineResult.files || [];
   const subtitles = pipelineResult.subtitles || [];
   // Here comes the big boy to loook for nothing okay here you go
   // We need finalResult coz you can't cache what doesn't exist yet - lowkey just consolidating the return logic

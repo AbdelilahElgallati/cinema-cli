@@ -53,16 +53,13 @@ if %NODE_MAJOR% LSS 18 (
 echo  [OK] Node.js %NODEVER% found.
 
 :: ── Warn about optional tools ────────────────────────────────────────────────
+set "MPV_FOUND=0"
 where mpv >nul 2>&1
-if errorlevel 1 (
-    if exist "%ProgramFiles%\mpv\mpv.exe" (
-        echo  [OK] mpv found at %ProgramFiles%\mpv\mpv.exe
-        goto :check_ffmpeg
-    )
-    if exist "%ProgramFiles(x86)%\mpv\mpv.exe" (
-        echo  [OK] mpv found at %ProgramFiles(x86)%\mpv\mpv.exe
-        goto :check_ffmpeg
-    )
+if %ERRORLEVEL% equ 0 set "MPV_FOUND=1"
+if exist "%ProgramFiles%\mpv\mpv.exe" set "MPV_FOUND=1"
+if exist "%ProgramFiles(x86)%\mpv\mpv.exe" set "MPV_FOUND=1"
+
+if "%MPV_FOUND%" equ "0" (
     echo  [WARN] mpv not found  ^(required for playback^)
     echo         Install: winget install mpv
     echo                  OR download from https://mpv.io/installation/
@@ -71,16 +68,13 @@ if errorlevel 1 (
 )
 
 :check_ffmpeg
+set "FFMPEG_FOUND=0"
 where ffmpeg >nul 2>&1
-if errorlevel 1 (
-    if exist "%ProgramFiles%\ffmpeg\bin\ffmpeg.exe" (
-        echo  [OK] ffmpeg found at %ProgramFiles%\ffmpeg\bin\ffmpeg.exe
-        goto :check_ytdlp
-    )
-    if exist "%ProgramFiles(x86)%\ffmpeg\bin\ffmpeg.exe" (
-        echo  [OK] ffmpeg found at %ProgramFiles(x86)%\ffmpeg\bin\ffmpeg.exe
-        goto :check_ytdlp
-    )
+if %ERRORLEVEL% equ 0 set "FFMPEG_FOUND=1"
+if exist "%ProgramFiles%\ffmpeg\bin\ffmpeg.exe" set "FFMPEG_FOUND=1"
+if exist "%ProgramFiles(x86)%\ffmpeg\bin\ffmpeg.exe" set "FFMPEG_FOUND=1"
+
+if "%FFMPEG_FOUND%" equ "0" (
     echo  [WARN] ffmpeg not found  ^(required for downloads^)
     echo         Install: winget install ffmpeg
 ) else (
@@ -134,17 +128,27 @@ if errorlevel 1 (
 echo  [OK] Python packages installed.
 
 :: ── Install Node.js backend dependencies ─────────────────────────────────────
-echo  Installing backend (Node.js) packages...
-pushd "%~dp0backend"
-call npm install --silent
-if errorlevel 1 (
-    echo  [ERROR] npm install failed.
+where npm >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo  [WARN] npm not found ^(required for the Node.js scraper^).
+    echo         If you want to use the local scraper, install Node.js: https://nodejs.org/
+    echo.
+) else (
+    echo  [INFO] Checking backend ^(Node.js^) dependencies...
+    pushd "%~dp0backend"
+    if exist node_modules (
+        echo  [INFO] Updating existing backend packages...
+    ) else (
+        echo  [INFO] Installing backend packages for the first time...
+    )
+    call npm install --silent
+    if errorlevel 1 (
+        echo  [WARN] npm install failed. Backend might not start correctly.
+    ) else (
+        echo  [OK] Backend Node packages ready.
+    )
     popd
-    pause
-    exit /b 1
 )
-popd
-echo  [OK] Backend Node packages installed.
 
 :: ── Copy .env if it doesn't exist ────────────────────────────────────────────
 if not exist "%~dp0.env" (

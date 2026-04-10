@@ -20,7 +20,7 @@ export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   if (shouldDebug) {
     console.log(`[M3U8 Proxy] Fetching: ${targetUrl}`);
@@ -51,7 +51,8 @@ export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
       console.log(`[M3U8 Proxy] Upstream Content Preview:\n${m3u8Content.substring(0, 300)}`);
     }
 
-    const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
+    // Use Base64 encoding for headers to avoid shell/argument mangling in players
+    const encodedHeaders = Buffer.from(JSON.stringify(headers)).toString('base64');
 
     // Process M3U8 content line by line - key difference from our previous implementation
     const processedLines = m3u8Content.split('\n').map((line) => {
@@ -68,19 +69,18 @@ export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
         if (uriMatch) {
           const mediaUrl = new URL(uriMatch[1], targetUrl).href;
           const proxyUrl = `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(mediaUrl)}&headers=${encodedHeaders}`;
-          return line.replace(uriMatch[1], proxyUrl);
+          return line.replace(`URI="${uriMatch[1]}"`, `URI="${proxyUrl}"`);
         }
         return line;
       }
 
-      // Handle #EXT-X-MAP (fMP4 init segments — required for CMAF/fMP4 HLS streams)
-      // Without proxying these, players fail to initialise the demuxer for certain episodes.
+      // Handle #EXT-X-MAP (fMP4 init segments)
       if (line.startsWith('#EXT-X-MAP:') && line.includes('URI=')) {
         const uriMatch = line.match(/URI="([^"]+)"/);
         if (uriMatch) {
           const mapUrl = new URL(uriMatch[1], targetUrl).href;
           const proxyUrl = `${serverUrl}/ts-proxy?url=${encodeURIComponent(mapUrl)}&headers=${encodedHeaders}`;
-          return line.replace(uriMatch[1], proxyUrl);
+          return line.replace(`URI="${uriMatch[1]}"`, `URI="${proxyUrl}"`);
         }
         return line;
       }
@@ -91,18 +91,18 @@ export async function proxyM3U8(targetUrl, headers, res, serverUrl) {
         if (uriMatch) {
           const keyUrl = new URL(uriMatch[1], targetUrl).href;
           const proxyUrl = `${serverUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodedHeaders}`;
-          return line.replace(uriMatch[1], proxyUrl);
+          return line.replace(`URI="${uriMatch[1]}"`, `URI="${proxyUrl}"`);
         }
         return line;
       }
 
-      // Handle #EXT-X-I-FRAME-STREAM-INF URI (for trick play / seek thumbnails)
+      // Handle #EXT-X-I-FRAME-STREAM-INF URI
       if (line.startsWith('#EXT-X-I-FRAME-STREAM-INF:') && line.includes('URI=')) {
         const uriMatch = line.match(/URI="([^"]+)"/);
         if (uriMatch) {
           const iframeUrl = new URL(uriMatch[1], targetUrl).href;
           const proxyUrl = `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(iframeUrl)}&headers=${encodedHeaders}`;
-          return line.replace(uriMatch[1], proxyUrl);
+          return line.replace(`URI="${uriMatch[1]}"`, `URI="${proxyUrl}"`);
         }
         return line;
       }

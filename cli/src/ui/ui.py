@@ -134,11 +134,18 @@ def show_splash():  # NOSONAR
     def _is_backend_running(url: str) -> bool:
         for probe_url in _probe_urls(url):
             try:
-                req = Request(probe_url, headers={"User-Agent": "cinema-cli/1.0"})
-                with urlopen(req, timeout=1) as resp:
+                req = Request(
+                    probe_url, 
+                    headers={
+                        "User-Agent": "cinema-cli/1.0",
+                        "Connection": "close",
+                        "Accept": "*/*"
+                    }
+                )
+                with urlopen(req, timeout=2) as resp:
                     if 200 <= int(getattr(resp, "status", 0)) < 400:
                         return True
-            except (URLError, ValueError):
+            except (URLError, ValueError, Exception):
                 continue
         return False
 
@@ -269,12 +276,13 @@ def show_goodbye():
 # ─── Header ────────────────────────────────────────────────────────────────────
 
 def print_header(subtitle=""):
+    """Print a stunning, professional app bar header."""
     clear()
     header = Text()
     header.append("🎬 CINEMA CLI", style=f"bold {PRIMARY}")
     if subtitle:
         header.append(" ┃ ", style=f"dim {PRIMARY}")
-        header.append(subtitle, style=f"bold {ACCENT}")
+        header.append(str(subtitle).upper(), style=f"bold {ACCENT}")
     header.append(" ┃ ", style=f"dim {PRIMARY}")
     header.append(f"v{APP_VERSION}", style=f"dim {TEXT}")
 
@@ -282,7 +290,7 @@ def print_header(subtitle=""):
         Panel(
             Align.center(header),
             border_style=PRIMARY,
-            box=box.ROUNDED,
+            box=box.HORIZONTALS,
             padding=(0, 2),
         )
     )
@@ -305,18 +313,18 @@ def format_item(item):
     type_icon = "🎬" if media_type == "Movie" else "📺"
     
     return (
-        f"{type_icon} [bold {TEXT}]{title}[/bold {TEXT}] "
-        f"[{WARNING}]({year})[/{WARNING}] "
-        f"[dim]⭐ {rating:.1f}[/dim]"
+        f"{type_icon} [bold {TEXT}]{title:<40}[/bold {TEXT}] "
+        f"[dim cyan]{year}[/dim cyan]  "
+        f"[bold {WARNING}]⭐ {rating:.1f}[/bold {WARNING}]"
     )
 
 
 # ─── Help bar strings ──────────────────────────────────────────────────────────
 
-_HELP_BROWSE = "  ↑↓/j/k Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
-_HELP_SELECT = "  ↑↓/j/k Navigate   Enter Confirm   B/Q Cancel  "
-_HELP_MULTI  = "  ↑↓/j/k Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
-_HELP_BROWSE_JUMP = "  ↑↓/j/k Navigate   Enter Select   J Jump   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
+_HELP_BROWSE = "  ↑↓ Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
+_HELP_SELECT = "  ↑↓ Navigate   Enter Confirm   B/Q Cancel  "
+_HELP_MULTI  = "  ↑↓ Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
+_HELP_BROWSE_JUMP = "  ↑↓ Navigate   Enter Select   J Jump   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
 
 
 # ─── Selection menu ────────────────────────────────────────────────────────────
@@ -459,14 +467,22 @@ def selection_menu(  # NOSONAR
         rating     = item.get("vote_average", 0)
         votes      = item.get("vote_count", 0)
         popularity = item.get("popularity", 0)
+        release_date = item.get("release_date") or item.get("first_air_date", "Unknown")
+        lang = str(item.get("original_language", "en")).upper()
+        media_type = "🎬 Movie" if ("title" in item or item.get("media_type") == "movie") else "📺 TV Show"
+        adult = "🔞 18+" if item.get("adult") else "✅ General"
 
         title_text    = html.escape(str(item.get("title") or item.get("name", "")))
         overview_text = html.escape(overview)
 
+        # Build a stunning detail card
         details  = f"\n<header> 📌 {title_text} </header>\n"
         details += f"<border>{'━' * 50}</border>\n"
+        details += f"<meta> {media_type}  │  📅 {release_date}  │  🌍 {lang}  │  {adult} </meta>\n"
+        details += f"<border>{'─' * 50}</border>\n"
         details += f"<rating>⭐  {rating:.1f}/10  ({votes:,} votes)</rating>\n"
-        details += f"<pop>🔥  Popularity: {popularity:.0f}</pop>\n\n"
+        details += f"<pop>🔥  Popularity: {popularity:.0f}</pop>\n"
+        details += f"<border>{'━' * 50}</border>\n\n"
         details += f"<overview>{overview_text}</overview>\n"
         return HTML(details)
 
@@ -479,8 +495,9 @@ def selection_menu(  # NOSONAR
             "item":     f"{TEXT}",
             "help":     f"italic dim {TEXT}",
             "dim":      f"dim {TEXT}",
-            "rating":   f"{WARNING}",
-            "pop":      f"{SUCCESS}",
+            "rating":   f"{WARNING} bold",
+            "pop":      f"{SUCCESS} bold",
+            "meta":     f"cyan",
             "overview": f"{TEXT}",
         }
     )

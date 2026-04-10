@@ -261,9 +261,16 @@ export function createProxyRoutes(app) {
     let headers = {};
 
     try {
-      headers = JSON.parse(req.query.headers || '{}');
+      const headerData = req.query.headers;
+      if (headerData) {
+        if (headerData.startsWith('{')) {
+          headers = JSON.parse(headerData);
+        } else {
+          headers = JSON.parse(Buffer.from(headerData, 'base64').toString());
+        }
+      }
     } catch (e) {
-      // Invalid headers JSON
+      // Invalid headers
     }
 
     if (!targetUrl) {
@@ -288,9 +295,16 @@ export function createProxyRoutes(app) {
     let headers = {};
 
     try {
-      headers = JSON.parse(req.query.headers || '{}');
+      const headerData = req.query.headers;
+      if (headerData) {
+        if (headerData.startsWith('{')) {
+          headers = JSON.parse(headerData);
+        } else {
+          headers = JSON.parse(Buffer.from(headerData, 'base64').toString());
+        }
+      }
     } catch (e) {
-      // Invalid headers JSON
+      // Invalid headers
     }
 
     if (!targetUrl) {
@@ -336,9 +350,17 @@ export function createProxyRoutes(app) {
     let headers = {};
 
     try {
-      headers = JSON.parse(req.query.headers || '{}');
+      const headerData = req.query.headers;
+      if (headerData) {
+        // Support both raw JSON and Base64 encoded JSON
+        if (headerData.startsWith('{')) {
+          headers = JSON.parse(headerData);
+        } else {
+          headers = JSON.parse(Buffer.from(headerData, 'base64').toString());
+        }
+      }
     } catch (e) {
-      // Invalid headers JSON
+      // Invalid headers
     }
 
     if (!targetUrl) {
@@ -377,6 +399,9 @@ export function createProxyRoutes(app) {
 export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }) {
   if (!apiResponse.files) return apiResponse;
 
+  // Check if the request is coming from the CLI
+  const isCLI = req.headers['x-client-type'] === 'cinema-cli';
+
   const processedFiles = apiResponse.files.map((file) => {
     if (!file.file || typeof file.file !== 'string') return file;
 
@@ -386,11 +411,9 @@ export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }
     // Extract original URL if it's wrapped in external proxy
     finalUrl = extractOriginalUrl(finalUrl);
 
-    // Check if the request is coming from the CLI (which can handle raw URLs)
-    const isCLI = req.headers['x-client-type'] === 'cinema-cli';
-
     if (isCLI) {
-      // If it's the CLI, return the raw URL and headers directly
+      // If it's the CLI, return the raw URL and headers directly.
+      // mpv handles raw URLs better with its own --http-header-fields.
       return {
         ...file,
         file: finalUrl,
@@ -398,7 +421,10 @@ export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }
       };
     }
 
-    // proxy ALL URLs through our system
+    // Use Base64 for headers to prevent shell issues for other clients
+    const base64Headers = Buffer.from(JSON.stringify(proxyHeaders)).toString('base64');
+
+    // proxy ALL URLs through our system for non-CLI clients
     if (
       (file.type && file.type.toLowerCase() === 'hls') ||
       finalUrl.includes('.m3u8') ||
@@ -418,7 +444,8 @@ export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }
         };
       }
 
-      const localProxyUrl = `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(finalUrl)}&headers=${encodeURIComponent(JSON.stringify(proxyHeaders))}`;
+      const finalBase64Headers = Buffer.from(JSON.stringify(proxyHeaders)).toString('base64');
+      const localProxyUrl = `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(finalUrl)}&headers=${encodeURIComponent(finalBase64Headers)}`;
 
       return {
         ...file,
@@ -437,7 +464,8 @@ export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }
         };
       }
 
-      const localProxyUrl = `${serverUrl}/ts-proxy?url=${encodeURIComponent(finalUrl)}&headers=${encodeURIComponent(JSON.stringify(proxyHeaders))}`;
+      const finalBase64Headers = Buffer.from(JSON.stringify(proxyHeaders)).toString('base64');
+      const localProxyUrl = `${serverUrl}/ts-proxy?url=${encodeURIComponent(finalUrl)}&headers=${encodeURIComponent(finalBase64Headers)}`;
 
       return {
         ...file,
@@ -451,14 +479,12 @@ export function processApiResponse(apiResponse, serverUrl, req = { headers: {} }
   const processedSubtitles = (apiResponse.subtitles || []).map((sub) => {
     if (!sub.url || typeof sub.url !== 'string') return sub;
 
-    // Check if the request is coming from the CLI (which can handle raw URLs)
-    const isCLI = req.headers['x-client-type'] === 'cinema-cli';
-
     if (isCLI) {
       // If it's the CLI, return the raw URL directly
       return sub;
     }
 
+    // We can use an empty or simple headers for sub-proxy if not available
     const localProxyUrl = `${serverUrl}/sub-proxy?url=${encodeURIComponent(sub.url)}`;
     return {
       ...sub,
