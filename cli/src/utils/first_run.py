@@ -303,7 +303,7 @@ def _step_opensubs_key():
     return key
 
 
-def _step_subdl_key():
+def _step_subdl_key() -> str | None:
     _banner("Step 5 / 8 — SubDL API key (optional)")
     _print(
         "  SubDL is an excellent alternative for Arabic and international subtitles.\n"
@@ -316,14 +316,18 @@ def _step_subdl_key():
         _print(f"[green]✓  SubDL key already configured: {existing[:8]}…[/green]")
         change = _input("  Replace it? (y/N): ").strip().lower()
         if change not in ("y", "yes"):
-            return existing
+            return None
 
     key = _input("  Paste your SubDL API key (or press Enter to skip): ").strip()
     if key:
         _write_env({"SUBDL_API_KEY": key})
         _print("[green]  ✓  SubDL key saved.[/green]")
     else:
-        _print("[dim]  Skipped — you can add SUBDL_API_KEY to .env later.[/dim]")
+        # If they chose to replace but entered nothing, it means clear it
+        if existing:
+            _print("[yellow]  ✓  SubDL key cleared.[/yellow]")
+        else:
+            _print("[dim]  Skipped — you can add SUBDL_API_KEY to .env later.[/dim]")
     return key
 
 
@@ -455,16 +459,29 @@ def run_wizard(force: bool = False):
         dl_dir     = _step_download_dir()
         theme      = _step_theme()
 
-        _write_env(
-            {
-                "TMDB_API_KEY": tmdb_key or _load_env_key("TMDB_API_KEY"),
-                "PORT": str(port),
-                "BACKEND_URL": backend_url,
-                "OPENSUBTITLES_API_KEY": opensubs_key or _load_env_key("OPENSUBTITLES_API_KEY"),
-                "SUBDL_API_KEY": subdl_key or _load_env_key("SUBDL_API_KEY"),
-                "DISABLE_CACHE": _load_env_key("DISABLE_CACHE") or "false",
-            }
-        )
+        # Build final env map
+        env_updates = {
+            "PORT": str(port),
+            "BACKEND_URL": backend_url,
+            "DISABLE_CACHE": _load_env_key("DISABLE_CACHE") or "false",
+        }
+        
+        if tmdb_key is not None:
+            env_updates["TMDB_API_KEY"] = tmdb_key
+        else:
+            env_updates["TMDB_API_KEY"] = _load_env_key("TMDB_API_KEY") or ""
+            
+        if opensubs_key is not None:
+            env_updates["OPENSUBTITLES_API_KEY"] = opensubs_key
+        else:
+            env_updates["OPENSUBTITLES_API_KEY"] = _load_env_key("OPENSUBTITLES_API_KEY") or ""
+            
+        if subdl_key is not None:
+            env_updates["SUBDL_API_KEY"] = subdl_key
+        else:
+            env_updates["SUBDL_API_KEY"] = _load_env_key("SUBDL_API_KEY") or ""
+
+        _write_env(env_updates)
 
         _write_settings(dl_dir, theme, backend_url)
         mark_setup_done()

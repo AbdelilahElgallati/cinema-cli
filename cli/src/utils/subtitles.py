@@ -26,12 +26,13 @@ def _looks_like_subtitle(payload: bytes) -> bool:
     low = head.lower()
     if b"<html" in low or b"<!doctype html" in low:
         return False
-    # Accept common subtitle patterns (srt/vtt/ass)
+    # Accept common subtitle patterns (srt/vtt/ass) and HLS manifests
     return (
         (b"WEBVTT" in head)
         or (b" --> " in head)
         or (b"{\\an" in head)
         or (b"Dialogue:" in head)
+        or (b"#EXTM3U" in head.upper())
     )
 
 
@@ -290,8 +291,9 @@ def fetch_subtitles(  # NOSONAR
                 title, langs, year=year, season=season, episode=episode, 
                 max_per_language=max_per_language, key=os_key
             )
-        except Exception:
-            pass
+        except Exception as e:
+            from src.utils import app_logger
+            app_logger.error(f"OpenSubtitles lookup failed for '{title}' (langs: {langs}): {e}")
 
     # Add OS results to final_out
     final_out.extend(os_results)
@@ -315,8 +317,9 @@ def fetch_subtitles(  # NOSONAR
                 current_count = sum(1 for item in final_out if item["lang"] == lang)
                 if current_count < max_per_language:
                     final_out.append(sr)
-        except Exception:
-            pass
+        except Exception as e:
+            from src.utils import app_logger
+            app_logger.error(f"SubDL lookup failed for '{title}' (langs: {needed_langs}): {e}")
 
     return final_out
 

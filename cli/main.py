@@ -230,7 +230,7 @@ from src.utils.source_strategy import (
 from src.utils.app_logger import log_event
 from src.utils.storage import load_json_data, save_json_data
 from src.utils.system_tools import is_tool_available
-from src.utils.utils import generate_filename
+from src.utils.utils import generate_filename, normalize_lang
 from src.utils.validator import select_working_source, select_multiple_working_sources, verify_source
 
 
@@ -997,8 +997,15 @@ class CinemaCLI:
             app_logger.debug(f"Suppressed error in main_menu theme color: {e}", exc_info=True)
             _hl_fg = "#FFFFFF"
 
+        if not hasattr(self, "backend_online_last_check"):
+            self.backend_online_last_check = 0
+            self.backend_online = False
+
         while True:
-            self.backend_online = self._check_backend_online()
+            current_time = time.time()
+            if current_time - self.backend_online_last_check > 5:
+                self.backend_online = self._check_backend_online()
+                self.backend_online_last_check = current_time
             self.print_dashboard()
             
             options = [
@@ -2229,23 +2236,10 @@ class CinemaCLI:
             if q_sel and q_sel.get("action") == "select":
                 selected_quality = q_sel["value"]["value"]
 
-            # Subtitle language selection
-            def _norm_lang(l):
-                l = (l or "").strip().lower()
-                if l in ["arabic","ara","ar"]:          return "ar"
-                if l in ["english","eng","en"]:         return "en"
-                if l in ["french","fra","fre","fr"]:    return "fr"
-                if l in ["spanish","spa","es"]:         return "es"
-                if l in ["german","deu","ger","de"]:    return "de"
-                if l in ["turkish","tur","tr"]:         return "tr"
-                if l in ["portuguese","por","pt"]:      return "pt"
-                if l in ["italian","ita","it"]:         return "it"
-                return l or "und"
-
             avail_codes = []
             for s in first_subs:
                 if isinstance(s, dict):
-                    code = _norm_lang(s.get("lang") or s.get("language"))
+                    code = normalize_lang(s.get("lang") or s.get("language"))
                     if code not in avail_codes:
                         avail_codes.append(code)
 
@@ -2449,17 +2443,10 @@ class CinemaCLI:
                 selected_quality = q_sel["value"]["value"]
 
             # Subtitle language selection (same logic as TV batch)
-            def _norm(l):
-                l = (l or "").strip().lower()
-                m2 = {"arabic":"ar","ara":"ar","ar":"ar","english":"en","eng":"en","en":"en",
-                      "french":"fr","fra":"fr","fre":"fr","fr":"fr","spanish":"es","spa":"es","es":"es",
-                      "german":"de","deu":"de","ger":"de","de":"de","turkish":"tr","tur":"tr","tr":"tr",
-                      "portuguese":"pt","por":"pt","pt":"pt","italian":"it","ita":"it","it":"it"}
-                return m2.get(l, l or "und")
             avail_codes = []
             for s in first_subs:
                 if isinstance(s, dict):
-                    c = _norm(s.get("lang") or s.get("language"))
+                    c = normalize_lang(s.get("lang") or s.get("language"))
                     if c not in avail_codes:
                         avail_codes.append(c)
             lang_opts, all_lang_codes = build_subtitle_menu_options(
@@ -2586,27 +2573,6 @@ class CinemaCLI:
             time.sleep(1.5)
             return False
 
-        # --- Helper: normalize language codes ---
-        def _norm_lang(l):
-            l = (l or "").strip().lower()
-            if l in ["arabic", "ara", "ar"]:
-                return "ar"
-            if l in ["english", "eng", "en"]:
-                return "en"
-            if l in ["french", "fra", "fre", "fr"]:
-                return "fr"
-            if l in ["spanish", "spa", "es"]:
-                return "es"
-            if l in ["german", "deu", "ger", "de"]:
-                return "de"
-            if l in ["turkish", "tur", "tr"]:
-                return "tr"
-            if l in ["portuguese", "por", "pt"]:
-                return "pt"
-            if l in ["italian", "ita", "it"]:
-                return "it"
-            return l or "und"
-
         # --- Resume playback support ---
         start_time = 0
         playback_key = None
@@ -2689,7 +2655,7 @@ class CinemaCLI:
         lang_codes = []
         for s in subtitles:
             if isinstance(s, dict) and s.get("url"):
-                code = _norm_lang(s.get("lang") or s.get("language"))
+                code = normalize_lang(s.get("lang") or s.get("language"))
                 if code not in lang_codes:
                     lang_codes.append(code)
 
@@ -2745,15 +2711,14 @@ class CinemaCLI:
             _speed_mbps = None
             for _test_url in _PROBE_URLS:
                 try:
-                    import time as _t
                     _req = Request(
                         _test_url,
                         headers={"User-Agent": "Mozilla/5.0"},
                     )
-                    _start = _t.time()
+                    _start = time.time()
                     with urlopen(_req, timeout=8) as _resp:
                         _chunk = _resp.read(131072)   # read up to 128 KB
-                    _elapsed = _t.time() - _start
+                    _elapsed = time.time() - _start
                     if _elapsed > 0 and len(_chunk) >= 8192:   # need at least 8 KB for a valid measurement
                         _speed_mbps = (len(_chunk) * 8) / (_elapsed * 1_000_000)
                         break                         # got a valid reading
@@ -2827,27 +2792,6 @@ class CinemaCLI:
             
             # Get multiple working sources for fallback
             working_sources = select_multiple_working_sources(filtered_files, count=3)
-            
-            # If no subtitles found and we are in a normal run, try to force refresh
-            # This handles the case where the backend has a stale cache with 0 subtitles
-            if not subtitles and not autoplay:
-                console.print("[dim]  No subtitles in cache, requesting fresh scrape...[/dim]")
-                if meta and meta.get("tmdb_id"):
-                    fresh_data = self.api.get_sources_api(
-                        meta["tmdb_id"], 
-                        meta.get("type", "movie"),
-                        meta.get("season"),
-                        meta.get("episode"),
-                        force_refresh=True
-                    )
-                    if fresh_data:
-                        subtitles = fresh_data.get("subtitles", [])
-                        if fresh_data.get("files"):
-                            fresh_files = fresh_data["files"]
-                            fresh_files, _fresh_mode = filter_sources_for_quality(fresh_files, selected_quality)
-                            if fresh_files:
-                                filtered_files = fresh_files
-                                working_sources = select_multiple_working_sources(fresh_files, count=3)
             
             if not working_sources:
                 console.print(f"[bold red]No working source found for: {title}[/bold red]")

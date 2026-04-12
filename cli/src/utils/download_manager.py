@@ -567,21 +567,7 @@ class DownloadManager:
         if not isinstance(raw_pref_langs, list) or not raw_pref_langs:
             raw_pref_langs = [preferred]
 
-        def norm_lang(lang: str) -> str:
-            l = (lang or "").strip().lower()
-            if l in ["arabic", "ara", "ar"]:   return "ar"
-            if l in ["english", "eng", "en"]:  return "en"
-            if l in ["french", "fre", "fra", "fr"]:  return "fr"
-            if l in ["spanish", "spa", "es"]:  return "es"
-            if l in ["german", "deu", "ger", "de"]:  return "de"
-            if l in ["turkish", "tur", "tr"]:  return "tr"
-            if l in ["portuguese", "por", "pt"]: return "pt"
-            if l in ["italian", "ita", "it"]:  return "it"
-            if l in ["chinese", "zho", "chi", "zh"]: return "zh"
-            if l in ["japanese", "jpn", "ja"]: return "ja"
-            if l in ["korean", "kor", "ko"]:   return "ko"
-            if l in ["hindi", "hin", "hi"]:    return "hi"
-            return l or "und"
+        from src.utils.utils import normalize_lang
 
         def display_lang(code: str) -> str:
             m = {
@@ -594,11 +580,11 @@ class DownloadManager:
             return m.get(code, code)
 
         # Normalize
-        preferred = norm_lang(preferred)
+        preferred = normalize_lang(preferred)
         if preferred == "none":
             return
 
-        wanted = [norm_lang(l) for l in raw_pref_langs if l]
+        wanted = [normalize_lang(l) for l in raw_pref_langs if l]
         if not wanted:
             wanted = [preferred]
         elif wanted[0] != preferred:
@@ -610,7 +596,7 @@ class DownloadManager:
         for s in subs:
             if isinstance(s, dict) and s.get("url"):
                 items.append({
-                    "lang": norm_lang(s.get("lang") or s.get("language") or s.get("code")),
+                    "lang": normalize_lang(s.get("lang") or s.get("language") or s.get("code")),
                     "url": s.get("url"),
                 })
 
@@ -641,13 +627,13 @@ class DownloadManager:
                     base = os.path.basename(base)
                     # Sort by wanted-list priority
                     def _sk(s):
-                        lc = norm_lang(str(s.get("lang") or "und"))
+                        lc = normalize_lang(str(s.get("lang") or "und"))
                         try: return langs.index(lc)
                         except ValueError: return len(langs)
                     subs_found = sorted(subs_found, key=_sk)
                     downloaded = []
                     for s in subs_found:
-                        lang = norm_lang(str(s.get("lang") or "und"))
+                        lang = normalize_lang(str(s.get("lang") or "und"))
                         ext = str(s.get("ext") or "srt")
                         content = s.get("content") or b""
                         if not content:
@@ -705,11 +691,16 @@ class DownloadManager:
         if not ordered:
             return
 
-        # Parallel subtitle download
         import requests
         base, _ = os.path.splitext(task.get("filename") or task.get("title") or "video")
         base = os.path.basename(base)
         
+        # Get TLS verification setting once
+        from src.utils.storage import load_json_data
+        from src.config import SETTINGS_FILE
+        _settings = load_json_data(SETTINGS_FILE) or {}
+        _verify_tls = _settings.get("SUBTITLE_VERIFY_TLS", True)
+
         def download_single_sub(sub):
             """Download a single subtitle file."""
             try:
@@ -718,7 +709,7 @@ class DownloadManager:
                 # Always save as .srt for maximum player compatibility
                 sub_filename = os.path.join(temp_dir, f"{base}.{sub_lang}.srt")
                 
-                resp = requests.get(sub_url, timeout=15, verify=False, headers=task.get("headers") or {})  # NOSONAR
+                resp = requests.get(sub_url, timeout=15, verify=_verify_tls, headers=task.get("headers") or {})  # NOSONAR
                 resp.raise_for_status()
                 
                 # Validate: avoid HTML error pages
@@ -1148,7 +1139,8 @@ class DownloadManager:
                 try:
                     for line in iter(process.stdout.readline, ""):
                         output_queue.put(line)
-                except Exception:
+                except Exception as e:
+                    app_logger.debug(f"Suppressed error in download_manager (kill proc): {e}", exc_info=True)
                     pass
                 finally:
                     process.stdout.close()
@@ -1165,7 +1157,8 @@ class DownloadManager:
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=3)
-                except Exception:
+                except Exception as e:
+                    app_logger.debug(f"Suppressed error in download_manager (wait proc): {e}", exc_info=True)
                     pass
                 reader_thread.join(timeout=3)
 
@@ -1666,7 +1659,7 @@ class DownloadManager:
                     headers=download_headers,
                     timeout=10,
                     allow_redirects=True,
-                    verify=False,
+                    verify=True,
                 )
             except Exception:
                 pass
@@ -1680,7 +1673,7 @@ class DownloadManager:
                     timeout=10,
                     allow_redirects=True,
                     stream=True,
-                    verify=False,
+                    verify=True,
                 )
 
             # Close streaming response body to release the connection back to
@@ -1761,7 +1754,7 @@ class DownloadManager:
                     headers=chunk_headers,
                     stream=True,
                     timeout=60,
-                    verify=False,
+                    verify=True,
                 ) as resp:
                     resp.raise_for_status()
                     
@@ -1833,7 +1826,7 @@ class DownloadManager:
                     headers=dl_headers,
                     stream=True,
                     timeout=60,
-                    verify=False,
+                    verify=True,
                 ) as resp:
                     
                     if resp.status_code not in [200, 206]:

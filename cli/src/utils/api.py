@@ -162,8 +162,8 @@ class APIClient:
             resp = self.session.get(url, params=default_params, timeout=self.timeout)
             resp.raise_for_status()
             return resp.json()
-        except Exception as e:
-            console.print(f"[bold red]Error fetching data: {e}[/bold red]")
+        except Exception:
+            console.print("[bold red]Error fetching metadata from TMDB. Check your API key and connection.[/bold red]")
             return None
 
     def get_sources_api(self, tmdb_id, media_type, season=None, episode=None, force_refresh=False):
@@ -274,34 +274,38 @@ class APIClient:
                         if resp.status_code == 200:
                             data = resp.json()
                             
-                            # DEBUG LOG
-                            import json, sys
-                            print(f"[DEBUG api] raw subtitles from backend: {json.dumps(data.get('subtitles'), indent=2)}", file=sys.stderr)
+                            from . import app_logger
+                            app_logger.debug(f"[DIAG-C] raw backend response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                            app_logger.debug(f"[DIAG-C] subtitle count from backend: {len(data.get('subtitles', [])) if isinstance(data, dict) else 'N/A'}")
+                            
+                            # Normalize response format early
+                            if isinstance(data, list):
+                                data = {
+                                    "files": data,
+                                    "subtitles": [],
+                                    "quality_groups": {},
+                                    "pipeline": {},
+                                }
+                            
+                            import sys
+                            if "--debug" in sys.argv:
+                                app_logger.debug(f"[DEBUG api] raw subtitles from backend: {data.get('subtitles')}")
 
-                            # Check for any valid content (files, subtitles or a list of files)
-                            if data and (data.get("files") or data.get("subtitles") or isinstance(data, list)):
-                                # Normalize response format
-                                if isinstance(data, list):
-                                    data = {
-                                        "files": data,
-                                        "subtitles": [],
-                                        "quality_groups": {},
-                                        "pipeline": {},
-                                    }
-                                else:
-                                    files = data.get("files")
-                                    subtitles = data.get("subtitles")
-                                    # Normalize files to list
-                                    normalized_files = files if isinstance(files, list) else ([files] if files else [])
-                                    # Normalize subtitles to list
-                                    normalized_subs = subtitles if isinstance(subtitles, list) else []
-                                    
-                                    data = {
-                                        "files": normalized_files,
-                                        "subtitles": normalized_subs,
-                                        "quality_groups": data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {},
-                                        "pipeline": data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {},
-                                    }
+                            # Check for any valid content (files or subtitles)
+                            if data and (data.get("files") or data.get("subtitles")):
+                                files = data.get("files")
+                                subtitles = data.get("subtitles")
+                                # Normalize files to list
+                                normalized_files = files if isinstance(files, list) else ([files] if files else [])
+                                # Normalize subtitles to list
+                                normalized_subs = subtitles if isinstance(subtitles, list) else []
+                                
+                                data = {
+                                    "files": normalized_files,
+                                    "subtitles": normalized_subs,
+                                    "quality_groups": data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {},
+                                    "pipeline": data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {},
+                                }
                                 # Persist the winning backend for the rest of this session
                                 self.settings["backend"] = base
                                 data["correlation_id"] = (
@@ -386,7 +390,7 @@ class APIClient:
     def get_sources_enhanced(self, tmdb_id, media_type, season=None, episode=None, min_sources=3):  # NOSONAR
         """
         Enhanced source fetching with multiple attempts and source aggregation.
-        Tries to get at least min_sources working sources.
+        Tries to get at least min_sources working sources and at least some subtitles.
         """
         all_sources = []
         seen_urls = set()
@@ -412,9 +416,13 @@ class APIClient:
                     seen_urls.add(url)
         _merge_subtitles(data.get("subtitles") if data else [])
         
-        # If we don't have enough sources, try fresh fetch
-        if len(all_sources) < min_sources:
-            console.print(f"[dim]  Found {len(all_sources)} sources, fetching fresh...[/dim]")
+        # Determine if we need a refresh (too few sources OR no subtitles found)
+        needs_refresh = (len(all_sources) < min_sources) or (not subtitle_map)
+        
+        # If we don't have enough data, try fresh fetch
+        if needs_refresh:
+            reason = "too few sources" if len(all_sources) < min_sources else "no subtitles"
+            console.print(f"[dim]  {reason.capitalize()} in cache, fetching fresh...[/dim]")
             fresh_data = self.get_sources_api(tmdb_id, media_type, season, episode, force_refresh=True)
             if fresh_data and fresh_data.get("files"):
                 for src in fresh_data["files"]:
@@ -430,6 +438,7 @@ class APIClient:
         return {
             "files": all_sources,
             "subtitles": list(subtitle_map.values()),
+            "pipeline": data.get("pipeline") if data else {},
         }
 
     def report_source_result(self, provider, success):

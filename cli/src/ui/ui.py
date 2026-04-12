@@ -132,8 +132,12 @@ def show_splash():  # NOSONAR
         return [f"{base}/", f"{base}/health", f"{base}/proxy/status"]
 
     def _is_backend_running(url: str) -> bool:
+        from urllib.parse import urlparse
         for probe_url in _probe_urls(url):
             try:
+                parsed = urlparse(probe_url)
+                if parsed.scheme not in ("http", "https"):
+                    continue
                 req = Request(
                     probe_url, 
                     headers={
@@ -145,7 +149,7 @@ def show_splash():  # NOSONAR
                 with urlopen(req, timeout=2) as resp:
                     if 200 <= int(getattr(resp, "status", 0)) < 400:
                         return True
-            except (URLError, ValueError, Exception):
+            except (URLError, ValueError):
                 continue
         return False
 
@@ -311,12 +315,9 @@ def format_item(item):
     
     # Enhance the item rendering with cleaner spacing and icons
     type_icon = "🎬" if media_type == "Movie" else "📺"
-    
-    return (
-        f"{type_icon} [bold {TEXT}]{title:<40}[/bold {TEXT}] "
-        f"[dim cyan]{year}[/dim cyan]  "
-        f"[bold {WARNING}]⭐ {rating:.1f}[/bold {WARNING}]"
-    )
+
+    short_title = textwrap.shorten(title, width=40, placeholder="...")    
+    return f"{type_icon} {short_title:<40} {year}  ⭐ {rating:.1f}"
 
 
 # ─── Help bar strings ──────────────────────────────────────────────────────────
@@ -497,7 +498,7 @@ def selection_menu(  # NOSONAR
             "dim":      f"dim {TEXT}",
             "rating":   f"{WARNING} bold",
             "pop":      f"{SUCCESS} bold",
-            "meta":     f"cyan",
+            "meta":     "cyan",
             "overview": f"{TEXT}",
         }
     )

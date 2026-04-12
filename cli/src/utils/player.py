@@ -1,4 +1,6 @@
+import hashlib
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -7,8 +9,22 @@ import requests
 import urllib3
 import atexit
 import logging as _logging
+import socket
+import json
+import threading
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Windows-specific imports for named pipes
+if sys.platform == "win32":
+    try:
+        import win32pipe
+        import win32file
+        import pywintypes
+    except ImportError:
+        win32file = None
+else:
+    win32file = None
 
 from rich.align import Align
 from rich.panel import Panel
@@ -24,20 +40,107 @@ from src.utils.utils import normalize_lang
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ─── Diagnostic Logger ─────────────────────────────────────────────
-_fh = _logging.FileHandler(
-    "D:/My_Projects/cinema-cli/stream_debug.log", 
-    mode="a", encoding="utf-8"
-)
-_fh.setFormatter(_logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-_fh.setLevel(_logging.DEBUG)
-_stream_log = _logging.getLogger("stream_debug")
-_stream_log.setLevel(_logging.DEBUG)
-if not _stream_log.handlers:
-    _stream_log.addHandler(_fh)
+def _init_stream_log():
+    try:
+        log_dir = os.path.expanduser("~/.cinema-cli")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "stream_debug.log")
+        handler = _logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    except Exception:
+        handler = _logging.StreamHandler()
+    
+    handler.setFormatter(_logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    handler.setLevel(_logging.DEBUG)
+    logger = _logging.getLogger("stream_debug")
+    logger.setLevel(_logging.DEBUG)
+    if not logger.handlers:
+        logger.addHandler(handler)
+    return logger
+
+_stream_log = _init_stream_log()
+
+# ─── IPC Communication ─────────────────────────────────────────────
+def mpv_ipc_send(ipc_path, command):
+    """Send a command to mpv via IPC (Unix socket or Windows named pipe)."""
+    payload = json.dumps({"command": command}).encode() + b"\n"
+    try:
+        if sys.platform == "win32":
+            if win32file is None:
+                app_logger.debug("[IPC] win32file not available, cannot send command.")
+                return
+            # Windows named pipe
+            handle = win32file.CreateFile(
+                ipc_path,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0, None, win32file.OPEN_EXISTING, 0, None
+            )
+            win32file.WriteFile(handle, payload)
+            win32file.CloseHandle(handle)
+        else:
+            # Unix domain socket
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(ipc_path)
+                s.sendall(payload)
+    except Exception as e:
+        app_logger.debug(f"[IPC] Failed to send command {command}: {e}")
 
 # ─── Pipeline Constants ─────────────────────────────────────────────
 SUBTITLE_TIMEOUT = 8  # 8s hard timeout per fallback request
 TOTAL_PIPELINE_LIMIT = 15 # 15s total limit for mpv launch
+
+# ─── Background Subtitle Handler ──────────────────────────────────────
+def _background_subtitle_handler(ipc_path, title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs, preferred_langs, already_found_paths):
+    """Fetch fallback subtitles in background and inject via IPC."""
+    # 1. Wait for IPC socket/pipe to be ready
+    found_ipc = False
+    for _ in range(30): # 3 seconds max
+        if sys.platform == "win32":
+            try:
+                handle = win32file.CreateFile(
+                    ipc_path,
+                    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    0, None, win32file.OPEN_EXISTING, 0, None
+                )
+                win32file.CloseHandle(handle)
+                found_ipc = True
+                break
+            except Exception:
+                pass
+        else:
+            if os.path.exists(ipc_path):
+                found_ipc = True
+                break
+        time.sleep(0.1)
+    
+    if not found_ipc:
+        app_logger.debug(f"[IPC] Socket/Pipe {ipc_path} never appeared. Fallback subs will not be injected.")
+        return
+
+    # 2. Fetch fallbacks (Stages 2 & 3)
+    try:
+        # Call _prepare_subtitles with skip_fallbacks=False to get everything
+        all_sub_paths, info = _prepare_subtitles(
+            title, subtitles, headers, meta, preferred_sub_lang, 
+            include_all_subs, fallback_langs, preferred_langs, skip_fallbacks=False
+        )
+        
+        # 3. Inject only the new fallback subtitles
+        for path in all_sub_paths:
+            if path not in already_found_paths:
+                # Basic label extraction from filename
+                fname = os.path.basename(path).lower()
+                lang_tag = "und"
+                for l in ["ar", "en", "fr", "es", "de", "it", "pt", "ru"]:
+                    if f"_{l}." in fname or f".{l}." in fname:
+                        lang_tag = l
+                        break
+                
+                label = f"Fallback ({lang_tag.upper()})"
+                mpv_ipc_send(ipc_path, ["sub-add", path, "auto", label])
+                app_logger.debug(f"[IPC] subtitle injected: {lang_tag} -> {path}")
+                
+    except Exception as e:
+        app_logger.debug(f"[IPC] Background subtitle handler failed: {e}")
 
 # ─── Supported Players ───────────────────────────────────────────────
 SUPPORTED_PLAYERS = ["mpv", "vlc", "iina"]
@@ -130,8 +233,10 @@ def _vtt_to_srt(vtt_text: str) -> str:
     return "\n\n".join(srt_blocks) + "\n" if srt_blocks else vtt_text
 
 
-def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=None, preferred_langs=None):  # NOSONAR
+def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs=None, preferred_langs=None, skip_fallbacks=False):  # NOSONAR
     """Mandated 4-Stage Subtitle Pipeline with Parallelization."""
+    _stream_log.debug(f"[DIAG-D] subtitle list received by player: {len(subtitles)} items")
+    _stream_log.debug(f"[DIAG-D] first subtitle: {subtitles[0] if subtitles else 'EMPTY'}")
     sub_paths = []
     found_langs = set()
     pipeline_info = {
@@ -158,17 +263,30 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
             l_code = normalize_lang(lang_raw)
             label = s.get("label") or lang_raw
             
-            local_path = os.path.join(temp_dir, f"{base_name}.src_{l_code}.srt")
+            # Use hash of URL to prevent filename collisions for same language
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:6]
+            local_path = os.path.join(temp_dir, f"{base_name}.src_{l_code}_{url_hash}.srt")
+            
             try:
-                # Use smarter headers: always User-Agent, but only Referer if same domain
-                # Subtitles are often on different CDNs that block the video's Referer
+                # Use smarter headers: always User-Agent and Referer if available.
+                # Providers often require the same Referer for subtitles as the video,
+                # even if they are hosted on different domains.
                 sub_headers = {"User-Agent": headers.get("User-Agent", "Mozilla/5.0")} if headers else {}
                 if headers and "Referer" in headers:
-                    from urllib.parse import urlparse as _up
-                    if _up(url).netloc == _up(headers["Referer"]).netloc:
-                        sub_headers["Referer"] = headers["Referer"]
+                    sub_headers["Referer"] = headers["Referer"]
+                if headers and "Origin" in headers:
+                    sub_headers["Origin"] = headers["Origin"]
 
-                r = requests.get(url, timeout=SUBTITLE_TIMEOUT, headers=sub_headers, verify=False)
+                # Honor TLS verification config
+                from src.utils.storage import load_json_data
+                from src.config import SETTINGS_FILE
+                settings = load_json_data(SETTINGS_FILE) or {}
+                verify_tls = settings.get("SUBTITLE_VERIFY_TLS", True)
+                
+                if not verify_tls:
+                    _stream_log.warning(f"TLS verification disabled for subtitle download: {url}")
+
+                r = requests.get(url, timeout=SUBTITLE_TIMEOUT, headers=sub_headers, verify=verify_tls)
                 if r.status_code == 200 and _looks_like_subtitle(r.content):
                     content = r.content
                     decoded = None
@@ -198,36 +316,58 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
         
         pipeline_info["stage1"]["count"] = len([p for p in sub_paths if "src_" in p])
 
+    if skip_fallbacks:
+        pipeline_info["stage2"]["result"] = "Deferred (Background)"
+        pipeline_info["stage3"]["result"] = "Deferred (Background)"
+        pipeline_info["final_count"] = len(sub_paths)
+        return sub_paths, pipeline_info
+
     # ── STAGES 2 & 3: FALLBACKS (Parallel) ──
-    if primary not in found_langs:
+    # Request all preferred languages if include_all_subs is True
+    search_langs = preferred_langs if (include_all_subs and preferred_langs) else [primary]
+    
+    # Check if we are still missing ANY preferred language
+    missing_langs = [l for l in search_langs if l not in found_langs]
+    
+    if missing_langs:
         os_key = os.getenv("OPENSUBTITLES_API_KEY") or OPENSUBTITLES_API_KEY
         dl_key = os.getenv("SUBDL_API_KEY") or SUBDL_API_KEY
         
         def try_os():
-            if not os_key: return "os", "⚠ API key not configured", None
+            if not os_key: return "os", "⚠ API key not configured", []
             try:
                 yr = meta.get("year"); sn = meta.get("season"); ep = meta.get("episode")
-                res = _fetch_from_opensubtitles(title, [primary], year=yr, season=sn, episode=ep, max_per_language=1, key=os_key)
+                # Fetch for all missing languages
+                res = _fetch_from_opensubtitles(title, missing_langs, year=yr, season=sn, episode=ep, max_per_language=1, key=os_key)
+                paths = []
                 if res:
-                    p = os.path.join(temp_dir, f"{base_name}.fallback_os_{primary}.srt")
-                    with open(p, "wb") as f: f.write(res[0]["content"])
-                    return "os", "✓ Found — downloaded", p
-                return "os", "✗ Not found", None
+                    for sub in res:
+                        l = sub.get("lang", "und")
+                        p = os.path.join(temp_dir, f"{base_name}.fallback_os_{l}.srt")
+                        with open(p, "wb") as f: f.write(sub["content"])
+                        paths.append((l, p))
+                    return "os", f"✓ Found {len(paths)} — downloaded", paths
+                return "os", "✗ Not found", []
             except Exception as e:
-                return "os", f"✗ Error: {str(e)[:20]}", None
+                return "os", f"✗ Error: {str(e)[:20]}", []
 
         def try_subdl():
-            if not dl_key: return "subdl", "⚠ API key not configured", None
+            if not dl_key: return "subdl", "⚠ API key not configured", []
             try:
                 yr = meta.get("year"); sn = meta.get("season"); ep = meta.get("episode")
-                res = fetch_subtitles_subdl(title, [primary], year=yr, season=sn, episode=ep, max_per_language=1)
+                # Fetch for all missing languages
+                res = fetch_subtitles_subdl(title, missing_langs, year=yr, season=sn, episode=ep, max_per_language=1)
+                paths = []
                 if res:
-                    p = os.path.join(temp_dir, f"{base_name}.fallback_subdl_{primary}.srt")
-                    with open(p, "wb") as f: f.write(res[0]["content"])
-                    return "subdl", "✓ Found — downloaded", p
-                return "subdl", "✗ Not found", None
+                    for sub in res:
+                        l = sub.get("lang", "und")
+                        p = os.path.join(temp_dir, f"{base_name}.fallback_subdl_{l}.srt")
+                        with open(p, "wb") as f: f.write(sub["content"])
+                        paths.append((l, p))
+                    return "subdl", f"✓ Found {len(paths)} — downloaded", paths
+                return "subdl", "✗ Not found", []
             except Exception as e:
-                return "subdl", f"✗ Error: {str(e)[:20]}", None
+                return "subdl", f"✗ Error: {str(e)[:20]}", []
 
         pipeline_info["stage2"]["searching"] = True
         pipeline_info["stage3"]["searching"] = True
@@ -235,13 +375,18 @@ def _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, incl
         with ThreadPoolExecutor(max_workers=2) as executor:
             tasks = [executor.submit(try_os), executor.submit(try_subdl)]
             for fut in as_completed(tasks):
-                provider, result, path = fut.result()
+                provider, result, paths = fut.result()
                 if provider == "os": pipeline_info["stage2"]["result"] = result
                 else: pipeline_info["stage3"]["result"] = result
                 
-                if path and primary not in found_langs:
-                    sub_paths.insert(0, path)
-                    found_langs.add(primary)
+                for l_code, path in paths:
+                    if path and path not in sub_paths:
+                        # Insert primary at start, others at end
+                        if l_code == primary:
+                            sub_paths.insert(0, path)
+                        else:
+                            sub_paths.append(path)
+                        found_langs.add(l_code)
         
         if primary in found_langs:
             if "Found" in pipeline_info["stage2"]["result"] and "Found" in pipeline_info["stage3"]["result"]:
@@ -274,32 +419,40 @@ def _quality_to_ytdl_format(quality):
     return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
 
 
-def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None):
+def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None, ipc_socket=None):
     """Build mpv command-line arguments."""
     mpv_exe = find_executable("mpv") or "mpv"
     primary = normalize_lang(preferred_sub_lang or "ar")
     
+    # Set HLS bitrate based on requested quality for direct HLS playback.
+    # mpv's --hls-bitrate selects the variant <= specified bitrate (bits/sec).
+    # Common bitrates: 1080p (5M), 720p (2.5M), 480p (1.2M), 360p (0.5M)
+    hls_bitrate = "max"
+    if quality and not use_ytdl:
+        q = str(quality).lower()
+        if "2160" in q or "4k" in q: hls_bitrate = "20000000"
+        elif "1080" in q: hls_bitrate = "5000000"
+        elif "720" in q: hls_bitrate = "2500000"
+        elif "480" in q: hls_bitrate = "1200000"
+        elif "360" in q: hls_bitrate = "500000"
+        elif "240" in q: hls_bitrate = "250000"
+
     args = [
         mpv_exe,
-        url,
         f"--title={title}",
         "--fs",
-        "--force-window=immediate",
         "--keep-open=yes",
         "--network-timeout=60",
         "--tls-verify=no",
         "--hwdec=no",
         "--framedrop=no",
-        "--hls-bitrate=max",
+        f"--hls-bitrate={hls_bitrate}",
         "--hr-seek=yes",
         "--hr-seek-framedrop=yes",
         "--audio-wait-open=0.5",
-        "--audio-stream-silence=yes",
         "--audio-pitch-correction=yes",
-        "--sub-fix-timing=yes",
-        "--sub-use-margins=yes",
-        "--sub-ass-override=strip",
-        "--sub-auto=fuzzy",
+        "--aid=auto",
+        "--sid=auto",
         f"--slang={primary},ar,ara,arabic,en,eng,fr,fra,es,spa",
         "--cache=yes",
         "--demuxer-max-bytes=150M",
@@ -308,14 +461,21 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
         "--cache-pause=yes",
         "--cache-pause-initial=yes",
         "--cache-pause-wait=5",
+        "--sub-fix-timing=yes",
+        "--sub-use-margins=yes",
+        "--sub-ass-override=force",
+        "--sub-auto=fuzzy",
         "--term-status-msg=STATUS: ${=time-pos} / ${=duration} | FPS=${estimated-vf-fps} | DROP=${drop-frame-count}",
     ]
+
+    if ipc_socket:
+        args.append(f"--input-ipc-server={ipc_socket}")
 
     if start_time > 0:
         args.append(f"--start={start_time}")
 
     if use_ytdl and is_tool_available("yt-dlp"):
-        args.insert(1, "--ytdl")
+        args.append("--ytdl")
         fmt = _quality_to_ytdl_format(quality)
         if fmt:
             args.append(f"--ytdl-format={fmt}")
@@ -323,23 +483,43 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
             args.append("--ytdl-format=bestvideo+bestaudio/best")
             args.append("--ytdl-raw-options=format-sort=res,fps")
 
-        is_proxied = "localhost:3010" in url.lower() or "127.0.0.1:3010" in url.lower()
-        if headers and not is_proxied:
-            header_list = [f"{k}: {v}" for k, v in headers.items() if "," not in str(v)]
-            if header_list:
-                args.append(f"--ytdl-raw-options-append=http-header-fields={','.join(header_list)}")
-                
-    if headers and not ("localhost:3010" in url.lower() or "127.0.0.1:3010" in url.lower()):
+    # Reset TLS verification to 'no' for streaming (standard for these providers)
+    # but honor global setting if explicitly requested.
+    from src.utils.storage import load_json_data
+    from src.config import SETTINGS_FILE
+    _settings = load_json_data(SETTINGS_FILE) or {}
+    _verify_tls = _settings.get("SUBTITLE_VERIFY_TLS", False) # Default False for stream compatibility
+    
+    for i, arg in enumerate(args):
+        if arg.startswith("--tls-verify="):
+            args[i] = f"--tls-verify={'yes' if _verify_tls else 'no'}"
+
+    # Use explicit flags for User-Agent and Referer as they are more robust across builds
+    is_proxied = "localhost:3010" in url.lower() or "127.0.0.1:3010" in url.lower()
+    if headers and not is_proxied:
         ua = headers.get("User-Agent") or headers.get("user-agent")
         if ua: args.append(f"--user-agent={ua}")
         ref = headers.get("Referer") or headers.get("referer")
         if ref: args.append(f"--referrer={ref}")
-        header_fields = [f"{k}: {v}" for k, v in headers.items() if "," not in str(v)]
-        if header_fields:
-            args.append(f"--http-header-fields={','.join(header_fields)}")
+        
+        # Add all OTHER headers to the fields list, avoiding UA/Referer duplicates
+        fields = []
+        for k, v in headers.items():
+            k_low = k.lower()
+            if k_low not in ["user-agent", "referer"] and "," not in str(v):
+                fields.append(f"{k}: {v}")
+        if fields:
+            args.append(f"--http-header-fields={','.join(fields)}")
+            if "--ytdl" in args:
+                args.append(f"--ytdl-raw-options-append=http-header-fields={','.join(fields)}")
 
     for sp in sub_paths:
         args.append(f"--sub-file={sp}")
+
+    args.append("--sub-forced-events-only=no")
+
+    # The stream URL MUST be the final argument for consistent track/sub behavior
+    args.append(url)
 
     return args
 
@@ -350,7 +530,7 @@ def _run_mpv(args):
     process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.DEVNULL,
         universal_newlines=True,
         encoding="utf-8",
         errors="ignore",
@@ -380,7 +560,9 @@ def _run_mpv(args):
                         fps_values.append(float(token.split("=", 1)[1].strip()))
                     elif token.upper().startswith("DROP="):
                         dropped_frames = max(dropped_frames, int(token.split("=", 1)[1].strip()))
-            except: pass
+            except Exception as e:
+                app_logger.debug(f"Error parsing mpv status line: {e}")
+                pass
         low = line.lower()
         if "video:" in low and "no video" not in low: had_video = True
         if "video: no video" in low or "no video streams selected" in low: no_video_explicit = True
@@ -436,18 +618,37 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
         clear()
         console.print(Panel(Align.center(f"[bold {SUCCESS}]Preparing playback...[/bold {SUCCESS}]\n[dim]{title}[/dim]"), border_style=SUCCESS))
 
-        # Run Pipeline (wrapped in try/except to never block launch)
+        # 1. IPC setup (if mpv)
+        ipc_path = None
+        if player_name == "mpv":
+            if sys.platform == "win32":
+                ipc_path = f"\\\\.\\pipe\\mpv-cinema-{os.getpid()}"
+            else:
+                ipc_path = os.path.join(tempfile.gettempdir(), f"mpv-cinema-{os.getpid()}.sock")
+
+        # 2. Run Pipeline - Stage 1 only (fast)
         sub_paths = []
         info = {}
         try:
-            sub_paths, info = _prepare_subtitles(title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs, preferred_langs)
+            # We call with skip_fallbacks=True to launch mpv immediately with what we have
+            sub_paths, info = _prepare_subtitles(
+                title, subtitles, headers, meta, preferred_sub_lang, 
+                include_all_subs, fallback_langs, preferred_langs, skip_fallbacks=True
+            )
         except Exception as sub_err:
-            _stream_log.exception(f"EXCEPTION in _prepare_subtitles: {sub_err}")
+            _stream_log.exception(f"EXCEPTION in _prepare_subtitles (Stage 1): {sub_err}")
             app_logger.error(f"Subtitle pipeline crashed: {sub_err}", exc_info=True)
             info = {"stage1": {"count": 0, "details": []}, "stage2": {"searching": False, "result": f"Error: {sub_err}"}, "stage3": {"searching": False, "result": "Skipped"}, "final_count": 0}
 
-        _stream_log.info(f"sub_paths after pipeline: {sub_paths}")
-        _stream_log.info(f"pipeline_info: {info}")
+        # Determine mode BEFORE info panel try block to avoid NameError if panel fails
+        url_l = (url or "").lower()
+        is_proxied = "localhost:3010" in url_l or "127.0.0.1:3010" in url_l
+        known_ytdlp_sites = [
+            "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+            "twitch.tv", "soundcloud.com"
+        ]
+        is_known_platform = any(s in url_l for s in known_ytdlp_sites)
+        prefer_ytdl_val = is_tool_available("yt-dlp") and not is_proxied and is_known_platform
 
         # ── Stream Launch Info Panel ──
         try:
@@ -458,18 +659,6 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
             info_table.add_row("Title", ": " + title)
             info_table.add_row("Quality", ": " + str(quality or "best/auto"))
             info_table.add_row("Source", ": " + domain)
-            
-            url_l = (url or "").lower()
-            is_proxied = "localhost:3010" in url_l or "127.0.0.1:3010" in url_l
-            
-            # Determine mode
-            known_ytdlp_sites = [
-                "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
-                "twitch.tv", "soundcloud.com"
-            ]
-            is_known_platform = any(s in url_l for s in known_ytdlp_sites)
-            prefer_ytdl_val = is_tool_available("yt-dlp") and not is_proxied and is_known_platform
-            
             info_table.add_row("Mode", ": " + ("yt-dlp" if prefer_ytdl_val else "direct"))
             
             info_table.add_section()
@@ -479,19 +668,11 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
                 info_table.add_row("", f"  → {l_code} ({label})  {status}")
 
             info_table.add_section()
-            info_table.add_row("[bold]Stage 2 — OpenSubtitles fallback[/]", "")
-            if info.get("stage2", {}).get("searching"):
-                info_table.add_row("", f"  Searching for: {primary.upper()}")
-            info_table.add_row("", f"  Result: {info.get('stage2', {}).get('result', 'Skipped')}")
+            info_table.add_row("[bold]Fallback subtitles (Background)[/]", ": Fetching in background...")
+            info_table.add_row("", "  → Subtitles will be injected into mpv when ready.")
 
             info_table.add_section()
-            info_table.add_row("[bold]Stage 3 — SUBDL fallback[/]", "")
-            if info.get("stage3", {}).get("searching"):
-                info_table.add_row("", f"  Searching for: {primary.upper()}")
-            info_table.add_row("", f"  Result: {info.get('stage3', {}).get('result', 'Skipped')}")
-
-            info_table.add_section()
-            info_table.add_row(f"[bold]Final subtitles passed to {player_name}[/]", f": {len(sub_paths)} files")
+            info_table.add_row(f"[bold]Initial subtitles passed to {player_name}[/]", f": {len(sub_paths)} files")
             for i, p in enumerate(sub_paths, 1):
                 fname = os.path.basename(p)
                 tag = " [bold green]← preferred[/]" if primary in fname.lower() else ""
@@ -502,8 +683,9 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
             _stream_log.exception(f"EXCEPTION in printing launch panel: {e}")
             app_logger.debug(f"Info panel error: {e}")
 
-        # TASK 1: PAUSE EXECUTION
-        input("Press Enter to launch the player...")
+        # TASK 1: PAUSE EXECUTION (only in debug mode)
+        if "--debug" in sys.argv or os.getenv("PLAYER_DEBUG") == "1":
+            input("Press Enter to launch the player...")
 
         # ── Player Launch ──
         if not url:
@@ -512,36 +694,50 @@ def play_stream(url, title, subtitles=None, headers=None, meta=None, start_time=
             time.sleep(2)
             return False
 
-        mpv_args = _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=prefer_ytdl_val, quality=quality if prefer_ytdl_val else None)
-        
-        _stream_log.info(f"mpv_args: {mpv_args}")
-        app_logger.debug(f"Launching {player_name} with {len(mpv_args)} args. URL present: {bool(url)}")
-        
         if player_name == "mpv":
+            app_logger.debug(f"[LAUNCH] prefer_ytdl_val={prefer_ytdl_val} sub_paths={sub_paths}")
+            mpv_args = _build_mpv_args(
+                url, title, headers, sub_paths, preferred_sub_lang, 
+                start_time, use_ytdl=prefer_ytdl_val, quality=quality if prefer_ytdl_val else None,
+                ipc_socket=ipc_path
+            )
+            
+            # Start background subtitle fetcher
+            bg_thread = threading.Thread(
+                target=_background_subtitle_handler,
+                args=(ipc_path, title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs, preferred_langs, sub_paths),
+                daemon=True
+            )
+            bg_thread.start()
+            
+            app_logger.debug(f"[LAUNCH] sub_paths at launch: {sub_paths}")
+            app_logger.debug(f"[LAUNCH] mpv args: {mpv_args}")
             stats = _run_mpv(mpv_args)
-            _stream_log.info(f"mpv stats: {stats}")
-            app_logger.debug(f"mpv returned stats: {stats}")
             
-            # Only return stats if it actually played something or exited cleanly (exit_code 0)
-            # If it exited with error and played 0 frames, return False to trigger retry
-            result = stats
-            if stats.get("duration") == 0 and stats.get("position") == 0 and stats.get("exit_code", 0) != 0:
-                result = False
+            # Cleanup IPC
+            if ipc_path:
+                if sys.platform != "win32":
+                    try:
+                        if os.path.exists(ipc_path):
+                            os.unlink(ipc_path)
+                    except Exception:
+                        pass
             
-            _stream_log.info(f"play_stream RESULT: {result}")
-            return result
+            return stats
         elif player_name == "vlc":
             vlc_args = _build_vlc_args(player_exe, url, title, headers, sub_paths, start_time)
             stats = _run_vlc(vlc_args)
-            _stream_log.info(f"VLC stats: {stats}")
             return stats
         return None
 
     except Exception as fatal_err:
+        import traceback
+        _stream_log.error(f"FATAL traceback: {traceback.format_exc()}")
         _stream_log.exception(f"FATAL in play_stream: {fatal_err}")
         console.print(f"[red]Fatal stream error: {fatal_err}[/red]")
         input("Press Enter to continue...")
         return False
+
 
 
 def play_video(url, title, preferred_sub_lang="ar", player="mpv"):

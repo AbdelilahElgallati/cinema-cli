@@ -34,3 +34,21 @@ def debug(message: str, exc_info: bool = False):
     if exc_info:
         msg += f"\n{traceback.format_exc()}"
     log_event("system", msg, level="DEBUG")
+
+
+def info(message: str):
+    """Log an info message."""
+    log_event("system", message, level="INFO")
+
+
+def warning(message: str):
+    """Log a warning message."""
+    log_event("system", message, level="WARNING")
+
+
+def error(message: str, exc_info: bool = False):
+    """Log an error message, optionally with exception traceback."""
+    msg = message
+    if exc_info:
+        msg += f"\n{traceback.format_exc()}"
+    log_event("system", msg, level="ERROR")

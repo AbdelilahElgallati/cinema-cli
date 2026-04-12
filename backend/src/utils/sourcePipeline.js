@@ -156,6 +156,7 @@ async function expandHlsVariants(source) {
 
       const quality = qualityFromStreamInf(line);
       const absoluteUrl = absolutizeUrl(source.file, variantUrl);
+      
       variants.push({
         ...source,
         file: absoluteUrl,
@@ -210,6 +211,9 @@ async function httpProbe(url, headers) {
 }
 
 function ffprobeCheck(url, headers) {
+  if (!url || !url.startsWith('http')) {
+    return { status: 'invalid_url', hasVideo: null };
+  }
   try {
     const ffprobe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
     const headerLines = Object.entries(headers || {})
@@ -416,7 +420,7 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     console.log(`[Pipeline] Final subtitle count: ${subtitles.length}`);
   }
 
-  return {
+  const result = {
     files: ranked,
     subtitles,
     quality_groups: groupedByQuality,
@@ -432,4 +436,7 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
       total_ms: Date.now() - startedAt,
     },
   };
+
+  console.log(`[DIAG-B] subtitles in pipeline response: ${JSON.stringify(result?.subtitles?.length)} items`);
+  return result;
 }

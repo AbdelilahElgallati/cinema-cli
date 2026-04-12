@@ -104,13 +104,13 @@ export async function getEmbedsu(media) {
 
       originalPlaylist = dataDirect.source;
 
-      tracks = dataDirect.subtitles
+      tracks = (dataDirect.subtitles || [])
         .map((sub) => ({
-          url: sub.file,
+          url: sub.file || sub.url,
           lang: languageMap[sub.label.split(/[\s-]/)[0]] || sub.label,
-          type: sub.file.split('.').pop(),
+          type: (sub.file || sub.url || '').split('.').pop(),
         }))
-        .filter((track) => track.lang);
+        .filter((track) => track.url && track.lang);
     }
 
     return {
