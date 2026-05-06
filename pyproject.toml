@@ -47,6 +47,9 @@ dev = [
   "mypy==1.16.0",
 ]
 
+[tool.setuptools]
+packages = { find = { where = ["cli"], include = ["src*"], exclude = ["tests*"] } }
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -56,6 +59,17 @@ exclude = ["pro-ai-orchestrator"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "W"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"cli/main.py" = ["B023", "E402", "E722", "E741"]
+"cli/src/utils/download_manager.py" = ["B007", "E741", "F401", "UP038"]
+"cli/src/utils/first_run.py" = ["F401"]
+"cli/src/utils/player.py" = ["E722", "F401"]
+"cli/src/utils/subtitles.py" = ["E741"]
+"cli/src/utils/utils.py" = ["E741"]
+"cli/src/utils/validator.py" = ["UP038"]
+"cli/src/utils/ytdlp_worker.py" = ["F841"]
+"cli/tests/test_player_ipc.py" = ["E741", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"

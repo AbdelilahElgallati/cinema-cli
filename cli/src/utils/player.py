@@ -1,10 +1,8 @@
-import atexit
 import hashlib
 import json
 import logging as _logging
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -12,40 +10,30 @@ import tempfile
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
 
 import requests
 import urllib3
-from rich.align import Align
-from rich.panel import Panel
-from rich.table import Table
+
 from src.config import (
-    ACCENT,
     DEFAULT_SUBTITLE_VERIFY_TLS,
-    OPENSUBTITLES_API_KEY,
     SETTINGS_FILE,
-    SUBDL_API_KEY,
-    SUCCESS,
-    WARNING,
     console,
 )
-from src.ui.ui import clear
 from src.utils import app_logger
 from src.utils.storage import load_json_data
 from src.utils.subtitles import (
     _looks_like_subtitle,
     fetch_subtitles,
 )
-from src.utils.system_tools import find_executable, is_tool_available
+from src.utils.system_tools import find_executable
 from src.utils.utils import normalize_lang
 
 # Windows-specific imports for named pipes
 if sys.platform == "win32":
     try:
-        import win32pipe
-        import win32file
         import pywintypes
+        import win32file
+        import win32pipe
     except ImportError:
         win32file = None
 else:
@@ -53,6 +41,7 @@ else:
 
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 # ─── Diagnostic Logger ─────────────────────────────────────────────
 def _init_stream_log():
@@ -63,8 +52,8 @@ def _init_stream_log():
         handler = _logging.FileHandler(log_path, mode="a", encoding="utf-8")
     except Exception:
         handler = _logging.StreamHandler()
-    
-    handler.setFormatter(_logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+    handler.setFormatter(_logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     handler.setLevel(_logging.DEBUG)
     logger = _logging.getLogger("stream_debug")
     logger.setLevel(_logging.DEBUG)
@@ -72,7 +61,9 @@ def _init_stream_log():
         logger.addHandler(handler)
     return logger
 
+
 _stream_log = _init_stream_log()
+
 
 # ─── IPC Communication ─────────────────────────────────────────────
 def mpv_ipc_send(ipc_path, command):
@@ -87,7 +78,11 @@ def mpv_ipc_send(ipc_path, command):
             handle = win32file.CreateFile(
                 ipc_path,
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                0, None, win32file.OPEN_EXISTING, 0, None
+                0,
+                None,
+                win32file.OPEN_EXISTING,
+                0,
+                None,
             )
             win32file.WriteFile(handle, payload)
             win32file.CloseHandle(handle)
@@ -119,9 +114,10 @@ class MpvIPCClient:
             raise ValueError(f"Refusing subtitle path outside temp dir: {subtitle_path}")
         mpv_ipc_send(self.ipc_path, ["sub-add", subtitle_path, flag, label])
 
+
 # ─── Pipeline Constants ─────────────────────────────────────────────
 SUBTITLE_TIMEOUT = 8  # 8s hard timeout per fallback request
-TOTAL_PIPELINE_LIMIT = 15 # 15s total limit for mpv launch
+TOTAL_PIPELINE_LIMIT = 15  # 15s total limit for mpv launch
 
 
 def _normalize_lang_list(values):
@@ -153,18 +149,35 @@ def _is_valid_subtitle_payload(payload):
         return False
     return _looks_like_subtitle(payload)
 
+
 # ─── Background Subtitle Handler ──────────────────────────────────────
-def _background_subtitle_handler(ipc_path, title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs, preferred_langs, already_found_paths, current_langs=None):
+def _background_subtitle_handler(
+    ipc_path,
+    title,
+    subtitles,
+    headers,
+    meta,
+    preferred_sub_lang,
+    include_all_subs,
+    fallback_langs,
+    preferred_langs,
+    already_found_paths,
+    current_langs=None,
+):
     """Fetch fallback subtitles in background and inject via IPC."""
     # 1. Wait for IPC socket/pipe to be ready
     found_ipc = False
-    for _ in range(30): # 3 seconds max
+    for _ in range(30):  # 3 seconds max
         if sys.platform == "win32" and win32file is not None:
             try:
                 handle = win32file.CreateFile(
                     ipc_path,
                     win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                    0, None, win32file.OPEN_EXISTING, 0, None
+                    0,
+                    None,
+                    win32file.OPEN_EXISTING,
+                    0,
+                    None,
                 )
                 win32file.CloseHandle(handle)
                 found_ipc = True
@@ -225,10 +238,10 @@ def _background_subtitle_handler(ipc_path, title, subtitles, headers, meta, pref
                 already_found_paths.add(path)
                 lang = normalize_lang(chosen.get("lang") or "und")
                 app_logger.debug(f"[BG-SUB] Injecting background sub: {path} ({lang})")
-                
+
                 label_prefix = "Preferred" if lang in desired_langs else "Fallback"
                 label = f"{label_prefix} ({lang})"
-                
+
                 # Smart selection logic:
                 # 1. If we have NO initial subtitles (current_langs is empty) AND this is our FIRST background sub: SELECT it.
                 # 2. If this is the primary preferred_sub_lang: SELECT it.
@@ -238,27 +251,30 @@ def _background_subtitle_handler(ipc_path, title, subtitles, headers, meta, pref
                     should_select = True
                 elif lang == normalize_lang(preferred_sub_lang):
                     should_select = True
-                
+
                 flag = "select" if should_select else "auto"
                 try:
                     ipc_client.add_subtitle(path, flag, label)
                 except ValueError as path_err:
-                    app_logger.debug(f"[BG-SUB] Skipped subtitle outside temp directory: {path_err}")
+                    app_logger.debug(
+                        f"[BG-SUB] Skipped subtitle outside temp directory: {path_err}"
+                    )
                     continue
-                
+
                 if should_select:
                     selected_any = True
-                    
+
                 if not include_all_subs:
                     break
+
 
 def _vtt_to_srt(vtt_path):
     """Simple VTT to SRT converter."""
     srt_path = vtt_path.replace(".vtt", ".srt")
     try:
-        with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(vtt_path, encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        
+
         with open(srt_path, "w", encoding="utf-8") as f:
             count = 1
             skip = True
@@ -304,6 +320,7 @@ def _subtitle_result_to_temp_file(sub):
     except Exception as e:
         app_logger.debug(f"Failed to materialize subtitle result: {e}")
         return None
+
 
 def _prepare_subtitles(  # NOSONAR
     subtitles,
@@ -408,7 +425,7 @@ def _prepare_subtitles(  # NOSONAR
                         episode=meta.get("episode"),
                         max_per_language=1,
                     )
-                    
+
                     for chosen in fetched_subs_all:
                         path = chosen.get("path") or _subtitle_result_to_temp_file(chosen)
                         sub_lang = normalize_lang(chosen.get("lang") or "und")
@@ -418,12 +435,12 @@ def _prepare_subtitles(  # NOSONAR
                             continue
                         if include_all_subs and sub_lang in found_langs:
                             continue
-                        
+
                         paths.append(path)
                         langs.append(sub_lang)
                         already_found.add(path)
                         found_langs.add(sub_lang)
-                        
+
                         if not include_all_subs and paths:
                             break
 
@@ -431,6 +448,7 @@ def _prepare_subtitles(  # NOSONAR
             app_logger.debug(f"Subtitle preparation failed: {e}")
 
     return paths, langs, already_found
+
 
 def detect_available_players():
     """Detect which media players are installed on the system."""
@@ -443,11 +461,12 @@ def detect_available_players():
         players.append("iina")
     return players
 
+
 def _quality_to_ytdl_format(quality):
     """Convert human quality (1080p) to yt-dlp format string."""
     if not quality or quality in ("auto", "best", "adaptive"):
         return None
-    
+
     if str(quality).lower() == "4k":
         return "bestvideo[height<=2160]+bestaudio/best[height<=2160]"
 
@@ -455,13 +474,27 @@ def _quality_to_ytdl_format(quality):
     h = "".join(filter(str.isdigit, str(quality)))
     if not h:
         return None
-            
+
     return f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"
+
 
 def _resolve_player(player_name):
     """Find executable for player name."""
     return find_executable(player_name) or player_name
-def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_time, use_ytdl=False, quality=None, preferred_langs=None, ipc_path=None):
+
+
+def _build_mpv_args(
+    url,
+    title,
+    headers,
+    sub_paths,
+    preferred_sub_lang,
+    start_time,
+    use_ytdl=False,
+    quality=None,
+    preferred_langs=None,
+    ipc_path=None,
+):
     """Helper to build mpv command arguments."""
     mpv_exe = _resolve_player("mpv")
 
@@ -477,13 +510,15 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
             cmd.append("--ytdl-raw-options=format-sort=res,fps")
 
     cmd.append(url)
-    cmd.extend([
-        f"--force-media-title={title}",
-        f"--title={title}",
-        "--fs",
-        "--keep-open=yes",
-        "--hls-bitrate=max",
-    ])
+    cmd.extend(
+        [
+            f"--force-media-title={title}",
+            f"--title={title}",
+            "--fs",
+            "--keep-open=yes",
+            "--hls-bitrate=max",
+        ]
+    )
 
     if ipc_path:
         cmd.append(f"--input-ipc-server={ipc_path}")
@@ -507,6 +542,7 @@ def _build_mpv_args(url, title, headers, sub_paths, preferred_sub_lang, start_ti
 
     return cmd
 
+
 def play_stream(  # NOSONAR
     url,
     title,
@@ -529,7 +565,7 @@ def play_stream(  # NOSONAR
         return False
 
     player = (player or "mpv").lower()
-    
+
     # 1. Prepare local/fast subtitles
     sub_paths, sub_langs, already_found = _prepare_subtitles(
         subtitles,
@@ -549,7 +585,7 @@ def play_stream(  # NOSONAR
             cmd.append(f"--start-time={int(start_time)}")
         for p in sub_paths:
             cmd.append(f"--sub-file={p}")
-        
+
         try:
             subprocess.run(cmd, check=False)
             return {"finished": True}
@@ -565,9 +601,16 @@ def play_stream(  # NOSONAR
 
     use_ytdl = (quality and quality != "auto") or ".m3u8" not in url.lower()
     cmd = _build_mpv_args(
-        url, title, headers, sub_paths, preferred_sub_lang, start_time, 
-        use_ytdl=use_ytdl, quality=quality, preferred_langs=preferred_langs,
-        ipc_path=ipc_path
+        url,
+        title,
+        headers,
+        sub_paths,
+        preferred_sub_lang,
+        start_time,
+        use_ytdl=use_ytdl,
+        quality=quality,
+        preferred_langs=preferred_langs,
+        ipc_path=ipc_path,
     )
 
     # Log command for debugging
@@ -576,8 +619,20 @@ def play_stream(  # NOSONAR
     # 3. Start background subtitle fetcher (slow providers)
     bg_thread = threading.Thread(
         target=_background_subtitle_handler,
-        args=(ipc_path, title, subtitles, headers, meta, preferred_sub_lang, include_all_subs, fallback_langs, preferred_langs, already_found, sub_langs),
-        daemon=True
+        args=(
+            ipc_path,
+            title,
+            subtitles,
+            headers,
+            meta,
+            preferred_sub_lang,
+            include_all_subs,
+            fallback_langs,
+            preferred_langs,
+            already_found,
+            sub_langs,
+        ),
+        daemon=True,
     )
     bg_thread.start()
 
@@ -585,21 +640,25 @@ def play_stream(  # NOSONAR
     try:
         start_ts = time.time()
         proc = subprocess.Popen(cmd)
-        
+
         # Monitor process
         while proc.poll() is None:
             time.sleep(1)
-        
+
         end_ts = time.time()
         duration_played = end_ts - start_ts
-        
+
         # Cleanup local subtitles
         for p in sub_paths:
-            try: os.remove(p)
-            except: pass
+            try:
+                os.remove(p)
+            except:
+                pass
         if sys.platform != "win32":
-            try: os.remove(ipc_path)
-            except: pass
+            try:
+                os.remove(ipc_path)
+            except:
+                pass
 
         return {
             "position": duration_played,
@@ -611,12 +670,13 @@ def play_stream(  # NOSONAR
         console.print(f"[red]Error launching mpv: {e}[/red]")
         return False
 
+
 def play_video(url, title, preferred_sub_lang="ar", player="mpv"):
     """Simple video player for local files.
     Automatically detects and loads matching subtitle files in the same directory.
     """
     player = (player or "mpv").lower()
-    
+
     # Try to find matching subtitles in the same directory
     sub_paths = []
     try:
@@ -624,11 +684,13 @@ def play_video(url, title, preferred_sub_lang="ar", player="mpv"):
             base_dir = os.path.dirname(url)
             filename = os.path.basename(url)
             file_base = os.path.splitext(filename)[0]
-            
+
             if os.path.exists(base_dir):
                 file_base_esc = re.escape(file_base)
                 # Matches Movie.srt or Movie.en.srt
-                pattern = re.compile(rf"^{file_base_esc}(\.[a-z]{{2,3}})?\.(srt|vtt|ass|ssa)$", re.IGNORECASE)
+                pattern = re.compile(
+                    rf"^{file_base_esc}(\.[a-z]{{2,3}})?\.(srt|vtt|ass|ssa)$", re.IGNORECASE
+                )
                 for f in os.listdir(base_dir):
                     if pattern.match(f):
                         sub_paths.append(os.path.join(base_dir, f))
@@ -646,11 +708,11 @@ def play_video(url, title, preferred_sub_lang="ar", player="mpv"):
         cmd = [mpv_exe, url, f"--title={title}", "--fs", "--keep-open=yes"]
         for p in sub_paths:
             cmd.append(f"--sub-file={p}")
-            
+
         # If we have a preferred lang, tell mpv to try selecting it
         if preferred_sub_lang and preferred_sub_lang != "none":
             code = normalize_lang(preferred_sub_lang)
             if code and code != "und":
                 cmd.append(f"--slang={code}")
-                
+
         subprocess.run(cmd, check=False)

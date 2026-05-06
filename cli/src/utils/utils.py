@@ -3,17 +3,17 @@ import re
 
 def normalize_lang(l: str | None) -> str:
     """Normalize language codes to 2-letter standard.
-    
+
     Handles subtags (en-US -> en), common aliases, and provider labels.
     """
     if not l:
         return "und"
-        
+
     # Split on common separators and take the first part
     # Handles "en-US", "pt_BR", "Arabic (Internal)", "English [SDH]"
     l = l.strip().lower()
-    primary = re.split(r'[-_ \(\[]', l)[0]
-    
+    primary = re.split(r"[-_ \(\[]", l)[0]
+
     if primary in ["arabic", "ara", "ar", "arab"]:
         return "ar"
     if primary in ["english", "eng", "en"]:
@@ -38,16 +38,14 @@ def normalize_lang(l: str | None) -> str:
         return "ko"
     if primary in ["hindi", "hin", "hi"]:
         return "hi"
-        
+
     # If it's already a 2-letter code, return it, otherwise fallback
     return primary if len(primary) == 2 else "und"
 
 
 def sanitize_filename(name):
     """Sanitize string to be safe for filenames"""
-    return (
-        "".join(c for c in name if c.isalnum() or c in " _-").strip().replace(" ", "_")
-    )
+    return "".join(c for c in name if c.isalnum() or c in " _-").strip().replace(" ", "_")
 
 
 def generate_filename(template, title, meta=None, source=None):

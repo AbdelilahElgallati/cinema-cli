@@ -1,16 +1,13 @@
-import datetime
 import asyncio
-import os
+import datetime
 import random
 import sys
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
-import requests
 import httpx
+import requests
 import urllib3
 from requests.adapters import HTTPAdapter
 from rich.progress import (
@@ -20,10 +17,11 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
 )
+from urllib3.util.retry import Retry
+
 from src.config import BACKEND_URL, TMDB_API_KEY, console
 from src.utils import app_logger
 from src.utils.app_logger import log_event
-from urllib3.util.retry import Retry
 
 # Suppress SSL warnings for external API providers
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -58,9 +56,7 @@ def create_session_with_retries():
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
     )
-    adapter = HTTPAdapter(
-        max_retries=retry_strategy, pool_connections=10, pool_maxsize=10
-    )
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.headers.update(
@@ -148,10 +144,12 @@ class APIClient:
             candidates.append(configured.rstrip("/"))
         if BACKEND_URL:
             candidates.append(BACKEND_URL.rstrip("/"))
-        candidates.extend([
-            "http://localhost:3010",
-            "http://127.0.0.1:3010",
-        ])
+        candidates.extend(
+            [
+                "http://localhost:3010",
+                "http://127.0.0.1:3010",
+            ]
+        )
 
         deduped = []
         seen = set()
@@ -190,14 +188,14 @@ class APIClient:
     def _get_provider_score(self, provider):
         """Get adaptive provider score based on static + dynamic success rate."""
         provider_lower = (provider or "unknown").lower()
-        
+
         # Base score from static config
         base_score = 50
         for key, score in PROVIDER_SCORES.items():
             if key in provider_lower:
                 base_score = score
                 break
-        
+
         # Adjust based on success history
         with self._lock:
             if provider_lower in self._provider_success:
@@ -208,7 +206,7 @@ class APIClient:
                     # Blend static and dynamic: 60% static, 40% dynamic
                     dynamic_score = success_rate * 100
                     return base_score * 0.6 + dynamic_score * 0.4
-        
+
         return base_score
 
     async def _get_tmdb_data_async(self, endpoint, params=None):
@@ -238,10 +236,12 @@ class APIClient:
     def get_tmdb_data(self, endpoint, params=None):
         return self._run_async(self._get_tmdb_data_async(endpoint, params=params))
 
-    def get_sources_api(self, tmdb_id, media_type, season=None, episode=None, force_refresh=False, quiet=False):
+    def get_sources_api(
+        self, tmdb_id, media_type, season=None, episode=None, force_refresh=False, quiet=False
+    ):
         """
         Get streaming sources with enhanced reliability.
-        
+
         Args:
             tmdb_id: TMDB ID of the content
             media_type: "movie" or "tv"
@@ -251,13 +251,17 @@ class APIClient:
             quiet: If True, disable progress display
         """
         cache_key = self._get_cache_key(tmdb_id, media_type, season, episode)
-        
+
         # Check local cache first (unless forced refresh)
         if not force_refresh and self._is_cache_valid(cache_key):
             cached = self._source_cache[cache_key]
             if cached.get("sources") and len(cached["sources"]) > 0:
-                return {"files": cached["sources"], "subtitles": cached.get("subtitles", []), "from_cache": True}
-        
+                return {
+                    "files": cached["sources"],
+                    "subtitles": cached.get("subtitles", []),
+                    "from_cache": True,
+                }
+
         # Fetch from backend with retry logic
         data = self._fetch_sources_with_retry(
             tmdb_id,
@@ -267,21 +271,21 @@ class APIClient:
             force_refresh=force_refresh,
             quiet=quiet,
         )
-        
+
         if data and data.get("files"):
             # Sort sources by provider reliability score
             files = data["files"]
             files = self._sort_sources_by_score(files)
             data["files"] = files
-            
+
             # Update local cache
             self._source_cache[cache_key] = {
                 "sources": files,
                 "subtitles": data.get("subtitles", []),
                 "timestamp": time.time(),
-                "success_count": 0
+                "success_count": 0,
             }
-        
+
         return data
 
     def _fetch_sources_with_retry(  # NOSONAR
@@ -297,9 +301,9 @@ class APIClient:
         """Fetch sources from backend with retry and jitter."""
         backend_bases = self._candidate_backends()
         correlation_id = self._new_correlation_id()
-        
+
         last_error = None
-        
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -307,10 +311,12 @@ class APIClient:
             TaskProgressColumn(),
             console=console,
             transient=True,
-            disable=quiet
+            disable=quiet,
         ) as progress:
-            task = progress.add_task("[cyan]Searching for sources...", total=(max_retries + 1) * len(backend_bases))
-            
+            task = progress.add_task(
+                "[cyan]Searching for sources...", total=(max_retries + 1) * len(backend_bases)
+            )
+
             for attempt in range(max_retries + 1):
                 if attempt > 0:
                     if not quiet:
@@ -322,7 +328,9 @@ class APIClient:
                 for base in backend_bases:
                     try:
                         if not quiet:
-                            progress.update(task, description=f"[cyan]Scraping {base} (Attempt {attempt+1})...")
+                            progress.update(
+                                task, description=f"[cyan]Scraping {base} (Attempt {attempt+1})..."
+                            )
                         if media_type == "movie":
                             url = f"{base}/movie/{tmdb_id}"
                         else:
@@ -351,9 +359,11 @@ class APIClient:
 
                         if resp.status_code == 200:
                             data = resp.json()
-                            
-                            app_logger.debug(f"[DIAG-C] raw backend response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
-                            
+
+                            app_logger.debug(
+                                f"[DIAG-C] raw backend response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}"
+                            )
+
                             # Normalize response format early
                             if isinstance(data, list):
                                 data = {
@@ -362,24 +372,32 @@ class APIClient:
                                     "quality_groups": {},
                                     "pipeline": {},
                                 }
-                            
+
                             if "--debug" in sys.argv:
-                                app_logger.debug(f"[DEBUG api] raw subtitles from backend: {data.get('subtitles')}")
+                                app_logger.debug(
+                                    f"[DEBUG api] raw subtitles from backend: {data.get('subtitles')}"
+                                )
 
                             # Check for any valid content (files or subtitles)
                             if data and (data.get("files") or data.get("subtitles")):
                                 files = data.get("files")
                                 subtitles = data.get("subtitles")
                                 # Normalize files to list
-                                normalized_files = files if isinstance(files, list) else ([files] if files else [])
+                                normalized_files = (
+                                    files if isinstance(files, list) else ([files] if files else [])
+                                )
                                 # Normalize subtitles to list
                                 normalized_subs = subtitles if isinstance(subtitles, list) else []
-                                
+
                                 data = {
                                     "files": normalized_files,
                                     "subtitles": normalized_subs,
-                                    "quality_groups": data.get("quality_groups") if isinstance(data.get("quality_groups"), dict) else {},
-                                    "pipeline": data.get("pipeline") if isinstance(data.get("pipeline"), dict) else {},
+                                    "quality_groups": data.get("quality_groups")
+                                    if isinstance(data.get("quality_groups"), dict)
+                                    else {},
+                                    "pipeline": data.get("pipeline")
+                                    if isinstance(data.get("pipeline"), dict)
+                                    else {},
                                 }
                                 # Persist the winning backend for the rest of this session
                                 self.settings["backend"] = base
@@ -389,7 +407,9 @@ class APIClient:
                                     or correlation_id
                                 )
                                 data["backend_used"] = base
-                                progress.update(task, completed=(max_retries + 1) * len(backend_bases))
+                                progress.update(
+                                    task, completed=(max_retries + 1) * len(backend_bases)
+                                )
                                 log_event(
                                     "api",
                                     f"sources fetched ({media_type}:{tmdb_id}) files={len(data.get('files', []))}",
@@ -420,36 +440,38 @@ class APIClient:
                         any_backend_busy = True
                     except Exception as e:
                         last_error = f"Error: {str(e)}"
-                    
+
                     progress.advance(task)
 
-                # End of backend loop for this attempt. 
+                # End of backend loop for this attempt.
                 # If we are here, no backend gave us results.
                 if attempt < max_retries:
-                    wait_time = (2 ** attempt) if any_backend_busy else 1.0
+                    wait_time = (2**attempt) if any_backend_busy else 1.0
                     jitter = random.uniform(0.5, 1.5)
                     total_wait = wait_time * jitter
-                    
+
                     if not quiet:
-                        progress.update(task, description=f"[yellow]No data yet, waiting {total_wait:.1f}s before retry...")
+                        progress.update(
+                            task,
+                            description=f"[yellow]No data yet, waiting {total_wait:.1f}s before retry...",
+                        )
                     time.sleep(total_wait)
-        
-        
+
         if last_error and not quiet:
             console.print(f"[red]  Backend error: {last_error}[/red]")
-        
+
         return {"correlation_id": correlation_id}
 
     def _sort_sources_by_score(self, sources):
         """Sort sources by provider reliability score (highest first)."""
         if not sources:
             return sources
-        
+
         def get_score(src):
             provider = src.get("provider", "")
             # Get base provider score
             score = self._get_provider_score(provider)
-            
+
             # Boost for quality indicators
             quality = (src.get("quality") or "").lower()
             if "1080" in quality:
@@ -458,17 +480,26 @@ class APIClient:
                 score += 5
             elif "4k" in quality or "2160" in quality:
                 score += 15
-            
+
             # Boost for HLS streams (more reliable)
             url = src.get("file", "")
             if ".m3u8" in url.lower() or "/hls/" in url.lower():
                 score += 5
-            
+
             return score
-        
+
         return sorted(sources, key=get_score, reverse=True)
 
-    def get_sources_enhanced(self, tmdb_id, media_type, season=None, episode=None, min_sources=3, refresh_on_missing_subtitles=True, quiet=False):  # NOSONAR
+    def get_sources_enhanced(
+        self,
+        tmdb_id,
+        media_type,
+        season=None,
+        episode=None,
+        min_sources=3,
+        refresh_on_missing_subtitles=True,
+        quiet=False,
+    ):  # NOSONAR
         """
         Enhanced source fetching with multiple attempts and source aggregation.
         Tries to get at least min_sources working sources and at least some subtitles.
@@ -495,7 +526,7 @@ class APIClient:
                 sub_url = sub.get("url")
                 if isinstance(sub_url, str) and sub_url and sub_url not in subtitle_map:
                     subtitle_map[sub_url] = sub
-        
+
         # First attempt - normal fetch
         data = self.get_sources_api(tmdb_id, media_type, season, episode, quiet=quiet)
         if data and data.get("files"):
@@ -505,26 +536,27 @@ class APIClient:
                     all_sources.append(src)
                     seen_urls.add(url)
         _merge_subtitles(data.get("subtitles") if data else [])
-        
+
         # Determine if we need a refresh (too few sources OR no subtitles found)
         # ONLY trigger refresh if the data was served from cache or was empty.
         # If it was already a fresh scrape, don't immediately retry.
         from_cache = data.get("from_cache", False) if data else False
-        
+
         # If data is None or empty dict, we definitely want a fresh try
         is_empty = not data or (not data.get("files") and not data.get("subtitles"))
-        
+
         needs_refresh = (from_cache or is_empty) and (
-            (len(all_sources) < min_sources) or 
-            (refresh_on_missing_subtitles and not subtitle_map)
+            (len(all_sources) < min_sources) or (refresh_on_missing_subtitles and not subtitle_map)
         )
-        
+
         # If we don't have enough data, try fresh fetch
         if needs_refresh:
             if not quiet:
                 reason = "too few sources" if len(all_sources) < min_sources else "no subtitles"
                 console.print(f"[dim]  {reason.capitalize()} in cache, fetching fresh...[/dim]")
-            fresh_data = self.get_sources_api(tmdb_id, media_type, season, episode, force_refresh=True, quiet=quiet)
+            fresh_data = self.get_sources_api(
+                tmdb_id, media_type, season, episode, force_refresh=True, quiet=quiet
+            )
             if fresh_data and fresh_data.get("files"):
                 for src in fresh_data["files"]:
                     url = src.get("file", "")
@@ -532,10 +564,10 @@ class APIClient:
                         all_sources.append(src)
                         seen_urls.add(url)
             _merge_subtitles(fresh_data.get("subtitles") if fresh_data else [])
-        
+
         # Sort all sources by score
         all_sources = self._sort_sources_by_score(all_sources)
-        
+
         return {
             "files": all_sources,
             "subtitles": list(subtitle_map.values()),

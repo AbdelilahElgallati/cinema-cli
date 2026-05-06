@@ -3,26 +3,27 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-import urllib3
 import uuid
-import requests
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from src.config import DOWNLOAD_LOG, SUCCESS, TEXT, WARNING, console
+import requests
+import urllib3
+
+from src.config import DOWNLOAD_LOG, console
 from src.utils import app_logger
-from src.utils.aria2_worker import Aria2Worker
 from src.utils.app_logger import log_event
+from src.utils.aria2_worker import Aria2Worker
 from src.utils.queue_manager import QueueManager
 from src.utils.source_strategy import filter_sources_for_quality
 from src.utils.storage import load_json_data
+from src.utils.subtitles import _looks_like_subtitle, fetch_subtitles
 from src.utils.system_tools import find_executable, is_tool_available
 from src.utils.utils import sanitize_filename
-from src.utils.subtitles import fetch_subtitles, _looks_like_subtitle
 from src.utils.ytdlp_worker import YtDlpWorker
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -114,28 +115,36 @@ class DownloadManager:
         self.queue_manager = QueueManager(DOWNLOADS_FILE)
         self.queue = self.queue_manager.load_queue()
         self.running = False
-        
+
         # Read concurrency limit from settings, environment, or use default from config
         from src.config import MAX_CONCURRENT_DOWNLOADS
+
         self.settings = settings or {}
-        self.max_workers = max_workers or int(self.settings.get("max_concurrent_downloads", os.getenv("MAX_CONCURRENT_DOWNLOADS", MAX_CONCURRENT_DOWNLOADS)))
-        
+        self.max_workers = max_workers or int(
+            self.settings.get(
+                "max_concurrent_downloads",
+                os.getenv("MAX_CONCURRENT_DOWNLOADS", MAX_CONCURRENT_DOWNLOADS),
+            )
+        )
+
         # Multi-worker executor
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.lock = threading.Lock()
         self.active_tasks = {}  # task_id -> future
-        self._active_task_ids = set() # Track multiple active downloads
-        
+        self._active_task_ids = set()  # Track multiple active downloads
+
         self.api_client = api_client
-        self.downloads_dir = downloads_dir or os.path.join(os.path.expanduser("~"), "Downloads", "cinema-cli")
+        self.downloads_dir = downloads_dir or os.path.join(
+            os.path.expanduser("~"), "Downloads", "cinema-cli"
+        )
         # Use user's temp directory instead of os.getcwd() to avoid system32 issues
         self.temp_dir = os.path.join(tempfile.gettempdir(), "cinema-cli-temp")
-        
+
         # Throttled save mechanism to reduce disk I/O
         self._last_save_time = 0
         self._save_interval = 2.0  # Min seconds between saves
         self._pending_save = False
-        
+
         # Singleton HTTP session pool
         self._http_session = None
         self._http_session_lock = threading.Lock()
@@ -163,7 +172,9 @@ class DownloadManager:
                 if not future.done():
                     future.cancel()
             except Exception as e:
-                app_logger.debug(f"Suppressed error in download_manager (cancel future): {e}", exc_info=True)
+                app_logger.debug(
+                    f"Suppressed error in download_manager (cancel future): {e}", exc_info=True
+                )
         self.executor.shutdown(wait=False)
         # Close the shared HTTP session to release TCP connections
         try:
@@ -227,7 +238,22 @@ class DownloadManager:
         except Exception:
             return True, 0, 0
 
-    def add_task(self, url, filename, title, subtitles=None, headers=None, meta=None, fallback_sources=None, api_params=None, preferred_sub_lang='ar', include_all_subs=True, preferred_sub_langs=None, fallback_sub_langs=None, quality=None):
+    def add_task(
+        self,
+        url,
+        filename,
+        title,
+        subtitles=None,
+        headers=None,
+        meta=None,
+        fallback_sources=None,
+        api_params=None,
+        preferred_sub_lang="ar",
+        include_all_subs=True,
+        preferred_sub_langs=None,
+        fallback_sub_langs=None,
+        quality=None,
+    ):
         task = self.queue_manager.build_task(
             url=url,
             filename=filename,
@@ -270,7 +296,7 @@ class DownloadManager:
         self.queue_manager.save_queue(self.queue)
         self._last_save_time = now
         self._pending_save = False
-    
+
     def _flush_save(self):
         """Force save if there are pending changes."""
         if self._pending_save:
@@ -324,10 +350,7 @@ class DownloadManager:
             try:
                 # Clean up finished tasks first
                 with self.lock:
-                    finished = [
-                        tid for tid, fut in self.active_tasks.items()
-                        if fut.done()
-                    ]
+                    finished = [tid for tid, fut in self.active_tasks.items() if fut.done()]
                     for tid in finished:
                         try:
                             future = self.active_tasks[tid]
@@ -354,7 +377,7 @@ class DownloadManager:
                         # Find next pending task (FIFO order by added_at)
                         pending_tasks = [t for t in self.queue if t["status"] == "pending"]
                         pending_tasks.sort(key=lambda t: t.get("added_at", 0))
-                        
+
                         for i in range(min(slots_available, len(pending_tasks))):
                             task = pending_tasks[i]
                             task["status"] = "downloading"
@@ -364,9 +387,7 @@ class DownloadManager:
                             task["_speed_samples"] = []  # (timestamp, bytes) for rolling speed
                             self._active_task_ids.add(task["id"])
                             self._save()
-                            future = self.executor.submit(
-                                self._safe_process_task_wrapper, task
-                            )
+                            future = self.executor.submit(self._safe_process_task_wrapper, task)
                             self.active_tasks[task["id"]] = future
 
             except Exception as e:
@@ -381,6 +402,7 @@ class DownloadManager:
             self._process_task(task)
         except Exception as e:
             import traceback
+
             tb = traceback.format_exc()
             self._log(f"Task {task.get('id')} crashed! \nTraceback:\n{tb}", level="ERROR")
             with self.lock:
@@ -394,18 +416,21 @@ class DownloadManager:
         """Robust task processing with parallel subtitle download and multiple fallback layers."""
         temp_dir = self.temp_dir
         os.makedirs(temp_dir, exist_ok=True)
-        
+
         # Use unique temp filename to avoid collisions
         temp_id = str(uuid.uuid4())[:8]
         # Sanitize the filename to avoid path issues
-        safe_fname = sanitize_filename(os.path.splitext(task['filename'])[0]) + ".mp4"
+        safe_fname = sanitize_filename(os.path.splitext(task["filename"])[0]) + ".mp4"
         mp4_out = os.path.join(temp_dir, f"{temp_id}_{safe_fname}")
 
         # Start subtitle download in background thread (parallel with video).
         # Keep fallback subtitle fetching enabled even when provider subtitles
         # are empty, unless the user explicitly disabled subtitles.
         subtitle_future = None
-        _subs_enabled = str(task.get("preferred_sub_lang") or "ar").strip().lower() not in ("none", "")
+        _subs_enabled = str(task.get("preferred_sub_lang") or "ar").strip().lower() not in (
+            "none",
+            "",
+        )
         if hasattr(self, "_download_subtitles") and _subs_enabled:
             subtitle_executor = ThreadPoolExecutor(max_workers=1)
             subtitle_future = subtitle_executor.submit(self._download_subtitles, task, temp_dir)
@@ -424,26 +449,28 @@ class DownloadManager:
                 # Exponential backoff: 5s, 15s — gives CDN rate-limit windows time to expire
                 backoff = 5 * (3 ** (attempt - 1))
                 self._log(
-                    f"Retry {attempt + 1}/{max_attempts} for {task['title']} (waiting {backoff}s)...", 
-                    level="INFO"
+                    f"Retry {attempt + 1}/{max_attempts} for {task['title']} (waiting {backoff}s)...",
+                    level="INFO",
                 )
                 time.sleep(backoff)
 
             try:
                 # Refresh source if needed (force_refresh on retry)
                 refreshed_url = self._refresh_source_if_needed(task, attempt)
-                
+
                 # If we got fresh URLs, clear failed-source blacklist — new URLs
                 # from different CDN edges may work even if old ones were 429/500
                 if refreshed_url and attempt > 0:
                     old_count = len(failed_source_names)
                     failed_source_names.clear()
                     if old_count:
-                        self._log(f"Cleared {old_count} failed sources after URL refresh", level="INFO")
-                
+                        self._log(
+                            f"Cleared {old_count} failed sources after URL refresh", level="INFO"
+                        )
+
                 # Build source list with priority
                 sources_to_try = self._build_source_list(task, refreshed_url)
-                
+
                 if not sources_to_try:
                     last_error = "No valid sources"
                     continue
@@ -455,13 +482,13 @@ class DownloadManager:
 
                     src_key = f"{source.get('name','')}|{self._extract_url(source.get('file',''))}"
                     if src_key in failed_source_names:
-                        self._log(f"Skipping previously failed source: {source.get('name')}", level="INFO")
+                        self._log(
+                            f"Skipping previously failed source: {source.get('name')}", level="INFO"
+                        )
                         continue
-                        
-                    success = self._try_download_source(
-                        source, mp4_out, task, attempt, i
-                    )
-                    
+
+                    success = self._try_download_source(source, mp4_out, task, attempt, i)
+
                     if success:
                         break
                     else:
@@ -469,10 +496,10 @@ class DownloadManager:
                         # Check if this source was rate-limited (429)
                         if task.get("_got_rate_limited"):
                             task.pop("_got_rate_limited", None)
-                
+
                 if success:
                     break
-                    
+
             except Exception as e:
                 last_error = str(e)
                 self._log(f"Attempt {attempt + 1} error: {e}", level="ERROR")
@@ -565,11 +592,19 @@ class DownloadManager:
 
         def display_lang(code: str) -> str:
             m = {
-                "ar": "Arabic", "en": "English", "fr": "French",
-                "es": "Spanish", "de": "German", "tr": "Turkish",
-                "pt": "Portuguese", "it": "Italian",
-                "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
-                "hi": "Hindi", "und": "Unknown",
+                "ar": "Arabic",
+                "en": "English",
+                "fr": "French",
+                "es": "Spanish",
+                "de": "German",
+                "tr": "Turkish",
+                "pt": "Portuguese",
+                "it": "Italian",
+                "zh": "Chinese",
+                "ja": "Japanese",
+                "ko": "Korean",
+                "hi": "Hindi",
+                "und": "Unknown",
             }
             return m.get(code, code)
 
@@ -591,9 +626,7 @@ class DownloadManager:
             if isinstance(s, dict) and s.get("url"):
                 items.append(
                     {
-                        "lang": normalize_lang(
-                            s.get("lang") or s.get("language") or s.get("code")
-                        ),
+                        "lang": normalize_lang(s.get("lang") or s.get("language") or s.get("code")),
                         "url": s.get("url"),
                     }
                 )
@@ -614,12 +647,13 @@ class DownloadManager:
             target_langs = _normalize_langs([preferred])
 
         import requests
+
         base, _ = os.path.splitext(task.get("filename") or task.get("title") or "video")
         base = os.path.basename(base)
-        
+
         # Get TLS verification setting once
-        from src.utils.storage import load_json_data
-        from src.config import SETTINGS_FILE, DEFAULT_SUBTITLE_VERIFY_TLS
+        from src.config import DEFAULT_SUBTITLE_VERIFY_TLS, SETTINGS_FILE
+
         _settings = load_json_data(SETTINGS_FILE) or {}
         _verify_tls = _settings.get("SUBTITLE_VERIFY_TLS", DEFAULT_SUBTITLE_VERIFY_TLS)
 
@@ -630,15 +664,17 @@ class DownloadManager:
                 sub_lang = sub["lang"] or "und"
                 # Always save as .srt for maximum player compatibility
                 sub_filename = os.path.join(temp_dir, f"{base}.{sub_lang}.srt")
-                
-                resp = requests.get(sub_url, timeout=15, verify=_verify_tls, headers=task.get("headers") or {})  # NOSONAR
+
+                resp = requests.get(
+                    sub_url, timeout=15, verify=_verify_tls, headers=task.get("headers") or {}
+                )  # NOSONAR
                 resp.raise_for_status()
-                
+
                 # Validate: avoid HTML error pages
                 content_type = (resp.headers.get("content-type") or "").lower()
                 if "text/html" in content_type and len(resp.content) < 8000:
                     return None
-                
+
                 # Validate: check for actual subtitle content
                 if not resp.content or len(resp.content) < 20:
                     return None
@@ -647,28 +683,38 @@ class DownloadManager:
                     return None
                 if not _looks_like_subtitle(resp.content):
                     return None
-                
+
                 # Decode robustly with extended encoding list
                 decoded = None
-                for enc in ["utf-8", "utf-8-sig", "cp1256", "windows-1256",
-                            "iso-8859-6", "iso-8859-1", "cp1252",
-                            "shift_jis", "euc-kr", "gb18030", "latin-1"]:
+                for enc in [
+                    "utf-8",
+                    "utf-8-sig",
+                    "cp1256",
+                    "windows-1256",
+                    "iso-8859-6",
+                    "iso-8859-1",
+                    "cp1252",
+                    "shift_jis",
+                    "euc-kr",
+                    "gb18030",
+                    "latin-1",
+                ]:
                     try:
                         decoded = resp.content.decode(enc)
                         break
                     except (UnicodeDecodeError, LookupError):
                         continue
-                
+
                 if decoded is None:
                     decoded = resp.content.decode("utf-8", errors="ignore")
-                
+
                 # Convert VTT to SRT if needed (fixes timing issues in many players)
                 if decoded.lstrip().startswith("WEBVTT") or ".vtt" in sub_url.lower():
                     decoded = _vtt_to_srt(decoded)
-                
+
                 with open(sub_filename, "w", encoding="utf-8-sig") as f:
                     f.write(decoded)
-                
+
                 return {
                     "lang": sub_lang,
                     "name": display_lang(sub_lang),
@@ -676,7 +722,7 @@ class DownloadManager:
                 }
             except Exception:
                 return None
-        
+
         try:
             # Stage 1: download provider subtitles that match requested languages.
             ordered = []
@@ -693,8 +739,7 @@ class DownloadManager:
                 subs_to_download = ordered[:5]
                 with ThreadPoolExecutor(max_workers=min(5, len(subs_to_download))) as executor:
                     futures = {
-                        executor.submit(download_single_sub, sub): sub
-                        for sub in subs_to_download
+                        executor.submit(download_single_sub, sub): sub for sub in subs_to_download
                     }
                     for future in as_completed(futures, timeout=30):
                         result = future.result()
@@ -725,7 +770,7 @@ class DownloadManager:
                     episode=epn,
                     max_per_language=1,
                 )
-                
+
                 for sub_item in subs_found_all:
                     lang = normalize_lang(str(sub_item.get("lang") or "und"))
                     if lang in downloaded_langs:
@@ -768,6 +813,7 @@ class DownloadManager:
             if downloaded:
                 # Ensure target_langs are also normalized for comparison
                 norm_targets = [normalize_lang(tl) for tl in target_langs]
+
                 def _final_sort(item):
                     code = normalize_lang(item.get("lang") or "und")
                     try:
@@ -790,18 +836,20 @@ class DownloadManager:
 
     def _refresh_source_if_needed(self, task, attempt):
         """Refresh streaming source from API if available.
-        
+
         On retry attempts, forces a cache bypass so the backend can return
         fresh CDN URLs (the old ones may be rate-limited or expired).
         Uses get_sources_enhanced on later retries to aggregate more providers.
         """
         if not (task.get("api_params") and self.api_client and attempt > 0):
             return None
-            
+
         try:
             p = task["api_params"]
-            self._log(f"Refreshing source (Attempt {attempt + 1}, force_refresh=True)...", level="INFO")
-            
+            self._log(
+                f"Refreshing source (Attempt {attempt + 1}, force_refresh=True)...", level="INFO"
+            )
+
             # On retry >= 2, use enhanced fetching to aggregate more providers
             if attempt >= 2 and hasattr(self.api_client, "get_sources_enhanced"):
                 data = self.api_client.get_sources_enhanced(
@@ -815,13 +863,13 @@ class DownloadManager:
             else:
                 # Always force_refresh on retry to bypass cached (possibly dead) URLs
                 data = self.api_client.get_sources_api(
-                    p.get("tmdb_id"), 
-                    p.get("media_type"), 
-                    p.get("season"), 
+                    p.get("tmdb_id"),
+                    p.get("media_type"),
+                    p.get("season"),
                     p.get("episode"),
                     force_refresh=True,
                 )
-            
+
             files = data.get("files", [])
             if files:
                 wanted_quality = task.get("quality")
@@ -841,34 +889,28 @@ class DownloadManager:
                 task["fallback_sources"] = files[1:] if len(files) > 1 else []
                 self._log(f"Got {len(files)} fresh source(s) from API", level="INFO")
                 return task["url"]
-                
+
         except Exception as e:
             self._log(f"Link refresh failed: {e}", level="WARNING")
-        
+
         return None
 
     def _build_source_list(self, task, refreshed_url):
         """Build prioritized list of sources to try."""
         sources = []
-        
+
         # Primary URL
         primary = refreshed_url or task.get("url")
         if primary:
-            sources.append({
-                "file": primary, 
-                "headers": task.get("headers"),
-                "name": "primary"
-            })
-        
+            sources.append({"file": primary, "headers": task.get("headers"), "name": "primary"})
+
         # Fallback sources
         for i, fb in enumerate(task.get("fallback_sources", [])):
             if fb.get("file") and fb["file"] != primary:
-                sources.append({
-                    "file": fb["file"],
-                    "headers": fb.get("headers"),
-                    "name": f"fallback_{i+1}"
-                })
-        
+                sources.append(
+                    {"file": fb["file"], "headers": fb.get("headers"), "name": f"fallback_{i+1}"}
+                )
+
         return sources
 
     def _try_download_source(self, source, output_path, task, _attempt_num, source_idx):  # NOSONAR
@@ -880,10 +922,7 @@ class DownloadManager:
         if url != source.get("file"):
             self._log("Normalized source URL for download", level="INFO")
 
-        self._log(
-            f"Trying source {source_idx + 1} ({source.get('name')})...", 
-            level="INFO"
-        )
+        self._log(f"Trying source {source_idx + 1} ({source.get('name')})...", level="INFO")
 
         # Keep partial file if it exists to allow resume
         if os.path.exists(output_path):
@@ -899,21 +938,29 @@ class DownloadManager:
         try:
             # Determine download strategy
             is_worker = any(x in url for x in ["workers.dev", "storm", "vidrock"])
-            
+
             # Try yt-dlp first
             success = self._download_with_ytdlp(url, output_path, task, source, is_worker)
-            
+
             # Fallback to direct download only for genuine non-HLS URLs.
             # Check for .m3u8, m3u8, master, playlist, index in URL to catch
             # obfuscated HLS streams (e.g. CloudFront .txt endpoints).
             if not success:
                 url_lower = url.lower()
-                looks_like_hls = any(sig in url_lower for sig in [
-                    ".m3u8", "m3u8", "master", "playlist", "/hls/", "/index",
-                ])
+                looks_like_hls = any(
+                    sig in url_lower
+                    for sig in [
+                        ".m3u8",
+                        "m3u8",
+                        "master",
+                        "playlist",
+                        "/hls/",
+                        "/index",
+                    ]
+                )
                 if not looks_like_hls:
                     success = self._direct_download(url, output_path, source.get("headers"), task)
-            
+
             # Validate result - check the expected path or find yt-dlp's actual output
             # Get expected runtime from TMDB metadata (minutes)
             expected_runtime = None
@@ -922,22 +969,30 @@ class DownloadManager:
                 expected_runtime = _meta.get("runtime")
 
             if success:
-                if os.path.exists(output_path) and self._validate_download(output_path, expected_runtime):
+                if os.path.exists(output_path) and self._validate_download(
+                    output_path, expected_runtime
+                ):
                     return True
                 # yt-dlp may have written to a different extension
                 temp_dir = os.path.dirname(output_path)
                 base_prefix = os.path.basename(output_path).split("_")[0]  # temp_id
                 for fname in os.listdir(temp_dir):
-                    if fname.startswith(base_prefix) and not fname.endswith(('.part', '.ytdl', '.temp')):
+                    if fname.startswith(base_prefix) and not fname.endswith(
+                        (".part", ".ytdl", ".temp")
+                    ):
                         candidate = os.path.join(temp_dir, fname)
-                        if candidate != output_path and os.path.isfile(candidate) and self._validate_download(candidate, expected_runtime):
+                        if (
+                            candidate != output_path
+                            and os.path.isfile(candidate)
+                            and self._validate_download(candidate, expected_runtime)
+                        ):
                             # Rename to expected output_path
                             try:
                                 shutil.move(candidate, output_path)
                                 return True
                             except Exception:
                                 return True  # file exists at candidate
-                
+
                 # Partial file retained intentionally — allows yt-dlp --continue on retry
                 self._cleanup_ytdlp_temps(output_path)
                 return False
@@ -945,7 +1000,7 @@ class DownloadManager:
                 # Partial file retained intentionally — allows yt-dlp --continue on retry
                 self._cleanup_ytdlp_temps(output_path)
                 return False
-                
+
         except Exception as e:
             self._log(f"Source {source_idx + 1} failed: {e}", level="ERROR")
             # Partial file retained intentionally — allows yt-dlp --continue on retry
@@ -1014,7 +1069,9 @@ class DownloadManager:
         was_rate_limited = task.get("_got_rate_limited", False)
         if was_rate_limited:
             fragments = os.getenv("YTDLP_CONCURRENT_FRAGMENTS") or "4"
-            self._log("Using reduced fragment concurrency (rate-limit detected earlier)", level="INFO")
+            self._log(
+                "Using reduced fragment concurrency (rate-limit detected earlier)", level="INFO"
+            )
         else:
             fragments = os.getenv("YTDLP_CONCURRENT_FRAGMENTS") or ("8" if is_worker else "16")
 
@@ -1026,22 +1083,34 @@ class DownloadManager:
         cmd = [
             ytdlp_exe,
             url,
-            "-o", output_path,
-            "--paths", f"temp:{output_dir}",
-            "--merge-output-format", "mp4",
+            "-o",
+            output_path,
+            "--paths",
+            f"temp:{output_dir}",
+            "--merge-output-format",
+            "mp4",
             "--newline",
             "--no-warnings",
             "--no-check-certificates",
-            "--fragment-retries", "10",           # 10 retries w/ exp backoff = ~60s window for CDN recovery
-            "--retry-sleep", "fragment:exp=1:20",  # backoff cap 20s (1→2→4→8→16→20s); avoids hammering rate-limited CDNs
-            "--extractor-retries", "3",           # retry manifest fetch on CDN hiccup
-            "--concurrent-fragments", fragments,
-            "--socket-timeout", "15",             # fail fast on dead connections
-            "--retries", "5",                     # reduced: if it fails 5 times, try fallback source
+            "--fragment-retries",
+            "10",  # 10 retries w/ exp backoff = ~60s window for CDN recovery
+            "--retry-sleep",
+            "fragment:exp=1:20",  # backoff cap 20s (1→2→4→8→16→20s); avoids hammering rate-limited CDNs
+            "--extractor-retries",
+            "3",  # retry manifest fetch on CDN hiccup
+            "--concurrent-fragments",
+            fragments,
+            "--socket-timeout",
+            "15",  # fail fast on dead connections
+            "--retries",
+            "5",  # reduced: if it fails 5 times, try fallback source
             "--no-playlist",
-            "--fixup", "never",
-            "--ffmpeg-location", ffmpeg_bin,
-            "--buffer-size", "16M",               # larger read-ahead = fewer stall pauses
+            "--fixup",
+            "never",
+            "--ffmpeg-location",
+            ffmpeg_bin,
+            "--buffer-size",
+            "16M",  # larger read-ahead = fewer stall pauses
             "--postprocessor-args",
             "ffmpeg:-movflags +faststart",
             "--no-write-description",
@@ -1057,7 +1126,15 @@ class DownloadManager:
         quality = task.get("quality")
         if quality and quality not in ("auto", "best"):
             q = quality.lower().replace("p", "").strip()
-            height_map = {"4k": 2160, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360, "240": 240}
+            height_map = {
+                "4k": 2160,
+                "2160": 2160,
+                "1080": 1080,
+                "720": 720,
+                "480": 480,
+                "360": 360,
+                "240": 240,
+            }
             height = height_map.get(q)
             if height is None:
                 try:
@@ -1086,13 +1163,16 @@ class DownloadManager:
                 conn = str(min(int(conn_env), 16))
             else:
                 conn = "12" if is_worker else "16"
-            cmd.extend([
-                "--downloader", "http,https:aria2c",
-                "--downloader-args",
-                f"aria2c:-x {conn} -s {conn} -k 5M --file-allocation=none "
-                f"--max-tries=10 --retry-wait=2 --timeout=30 "
-                f"--connect-timeout=10 --split={conn}"
-            ])
+            cmd.extend(
+                [
+                    "--downloader",
+                    "http,https:aria2c",
+                    "--downloader-args",
+                    f"aria2c:-x {conn} -s {conn} -k 5M --file-allocation=none "
+                    f"--max-tries=10 --retry-wait=2 --timeout=30 "
+                    f"--connect-timeout=10 --split={conn}",
+                ]
+            )
 
         # Speed throttle: --limit-rate caps yt-dlp bandwidth (user-configurable)
         speed_limit_mb = 0
@@ -1112,7 +1192,7 @@ class DownloadManager:
         ref = headers.get("Referer") or headers.get("referer")
         if ref:
             cmd.extend(["--referer", ref])
-        
+
         # Additional headers
         for k, v in headers.items():
             k_lower = k.lower()
@@ -1126,10 +1206,16 @@ class DownloadManager:
                 self._save()
 
         def _on_line(stripped: str):
-            if any(x in stripped.lower() for x in ["ffmpeg", "merger", "error", "100%", "complete"]):
+            if any(
+                x in stripped.lower() for x in ["ffmpeg", "merger", "error", "100%", "complete"]
+            ):
                 self._log(f"yt-dlp: {stripped[:100]}", level="INFO")
 
-            if "429" in stripped or "too many requests" in stripped.lower() or "rate limit" in stripped.lower():
+            if (
+                "429" in stripped
+                or "too many requests" in stripped.lower()
+                or "rate limit" in stripped.lower()
+            ):
                 with self.lock:
                     task["_got_rate_limited"] = True
                 self._log("CDN rate-limiting detected (429)", level="WARNING")
@@ -1226,7 +1312,21 @@ class DownloadManager:
 
     def _parse_progress_line(self, line, task):  # NOSONAR
         """Thread-safe progress parsing with real byte tracking. Returns True if progress was updated."""
-        if not any(x in line for x in ["[download]", "[aria2c]", "[#", "[Merger]", "[ffmpeg]", "Merging", "Destination:", "[ExtractAudio]", "[FixupM3u8]", "has already been downloaded"]):
+        if not any(
+            x in line
+            for x in [
+                "[download]",
+                "[aria2c]",
+                "[#",
+                "[Merger]",
+                "[ffmpeg]",
+                "Merging",
+                "Destination:",
+                "[ExtractAudio]",
+                "[FixupM3u8]",
+                "has already been downloaded",
+            ]
+        ):
             return False
 
         updated = False
@@ -1243,7 +1343,9 @@ class DownloadManager:
                 if frag_match:
                     task["_frag_current"] = int(frag_match.group(1))
                     task["_frag_total"] = int(frag_match.group(2))
-                    task["_base_progress"] = ((task["_frag_current"] - 1) / task["_frag_total"]) * 100
+                    task["_base_progress"] = (
+                        (task["_frag_current"] - 1) / task["_frag_total"]
+                    ) * 100
                     updated = True
 
                 # ── Percentage ──
@@ -1262,7 +1364,9 @@ class DownloadManager:
                             updated = True
 
                 # ── Byte sizes: "15.2MiB/25.4MiB" ──
-                size_pair = re.search(r"([\d.]+\s*[KMG]?i?B)\s*/\s*([\d.]+\s*[KMG]?i?B)", line, re.IGNORECASE)
+                size_pair = re.search(
+                    r"([\d.]+\s*[KMG]?i?B)\s*/\s*([\d.]+\s*[KMG]?i?B)", line, re.IGNORECASE
+                )
                 if size_pair:
                     dl_bytes = self._parse_size_to_bytes(size_pair.group(1))
                     total_bytes = self._parse_size_to_bytes(size_pair.group(2))
@@ -1307,7 +1411,7 @@ class DownloadManager:
                 # size_pair ("X/Y") never matches, so _bytes_downloaded would
                 # stay at 0 forever.  Always re-derive from progress × total.
                 _total = task.get("_bytes_total", 0)
-                _pct   = task.get("progress", 0)
+                _pct = task.get("progress", 0)
                 if _total > 0 and _pct > 0:
                     estimated = int((_pct / 100) * _total)
                     if estimated > task.get("_bytes_downloaded", 0):
@@ -1371,9 +1475,20 @@ class DownloadManager:
             if sys.platform == "win32":
                 _kw["creationflags"] = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-                capture_output=True, text=True, timeout=30, **_kw,
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    file_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                **_kw,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return float(result.stdout.strip())
@@ -1383,7 +1498,7 @@ class DownloadManager:
 
     def _validate_download(self, file_path, expected_runtime_min=None):  # NOSONAR
         """Validate that downloaded file is valid media.
-        
+
         Args:
             file_path: Path to the downloaded file.
             expected_runtime_min: Expected runtime in minutes (from TMDB).
@@ -1392,36 +1507,42 @@ class DownloadManager:
         """
         if not os.path.exists(file_path):
             return False
-            
+
         size = os.path.getsize(file_path)
-        
+
         # A complete TV episode or movie is always larger than 20 MB.
         # Partial files from killed yt-dlp processes are typically 1-10 MB,
         # so this threshold reliably rejects them without false positives.
         if size < 20 * 1024 * 1024:
-            self._log(f"Validation failed: File too small ({size / (1024*1024):.1f} MB) — likely partial", level="WARNING")
+            self._log(
+                f"Validation failed: File too small ({size / (1024*1024):.1f} MB) — likely partial",
+                level="WARNING",
+            )
             return False
-            
+
         # Check if file starts with common media signatures
         try:
-            with open(file_path, 'rb') as f:
-                header = f.read(2048) # Read a larger chunk to check for HTML tags
-                
+            with open(file_path, "rb") as f:
+                header = f.read(2048)  # Read a larger chunk to check for HTML tags
+
             # Check for HTML signature (indicates error page)
             header_str = header.lower()
-            if b'<!doctype html' in header_str or b'<html' in header_str or b'<head' in header_str:
+            if b"<!doctype html" in header_str or b"<html" in header_str or b"<head" in header_str:
                 self._log("Validation failed: File is HTML, not video", level="ERROR")
                 return False
-                
+
             # Check for obvious video signatures (basic check)
             # ftyp (mp4), \x30\x26\xB2\x75 (wmv), \x1A\x45\xDF\xA3 (mkv)
-            video_signatures = [b'ftyp', b'\x30\x26\xB2\x75', b'\x1A\x45\xDF\xA3', b'OggS', b'RIFF']
+            video_signatures = [b"ftyp", b"\x30\x26\xb2\x75", b"\x1a\x45\xdf\xa3", b"OggS", b"RIFF"]
             found_sig = any(sig in header for sig in video_signatures)
-            
+
             if not found_sig and size < 5 * 1024 * 1024:
                 # If no signature and small, be suspicious
-                self._log("Validation Warning: No common video signature found in small file", level="WARNING")
-                
+                self._log(
+                    "Validation Warning: No common video signature found in small file",
+                    level="WARNING",
+                )
+
         except Exception as e:
             self._log(f"Validation error: {e}", level="WARNING")
             # If we can't validate but file is big, assume OK
@@ -1447,12 +1568,12 @@ class DownloadManager:
                         f"Validation failed: Duration too short "
                         f"({actual_secs/60:.1f} min vs expected {expected_runtime_min} min, "
                         f"{ratio*100:.0f}%) — likely truncated stream",
-                        level="WARNING"
+                        level="WARNING",
                     )
                     return False
                 self._log(
                     f"Duration OK: {actual_secs/60:.1f} min / {expected_runtime_min} min ({ratio*100:.0f}%)",
-                    level="INFO"
+                    level="INFO",
                 )
 
         return True
@@ -1461,28 +1582,35 @@ class DownloadManager:
         """Convert size string like '15.2MiB' to bytes."""
         try:
             # Remove any ~ prefix
-            size_str = size_str.replace('~', '').strip()
-            
+            size_str = size_str.replace("~", "").strip()
+
             # Parse number and unit
-            match = re.match(r'([\d.]+)([KMG]?i?B?)', size_str, re.IGNORECASE)
+            match = re.match(r"([\d.]+)([KMG]?i?B?)", size_str, re.IGNORECASE)
             if not match:
                 return 0
-                
+
             num = float(match.group(1))
             unit = match.group(2).upper()
-            
+
             # Convert to bytes
             multipliers = {
-                'B': 1, '': 1,
-                'KB': 1000, 'KIB': 1024, 'K': 1024,
-                'MB': 1000000, 'MIB': 1024 * 1024, 'M': 1024 * 1024,
-                'GB': 1000000000, 'GIB': 1024 * 1024 * 1024, 'G': 1024 * 1024 * 1024
+                "B": 1,
+                "": 1,
+                "KB": 1000,
+                "KIB": 1024,
+                "K": 1024,
+                "MB": 1000000,
+                "MIB": 1024 * 1024,
+                "M": 1024 * 1024,
+                "GB": 1000000000,
+                "GIB": 1024 * 1024 * 1024,
+                "G": 1024 * 1024 * 1024,
             }
-            
+
             return int(num * multipliers.get(unit, 1))
         except (TypeError, ValueError):
             return 0
-    
+
     def _bytes_to_human(self, bytes_val):
         """Convert bytes to human readable string."""
         try:
@@ -1497,7 +1625,7 @@ class DownloadManager:
                 return f"{bytes_val / (1024 * 1024 * 1024):.1f}GB"
         except (TypeError, ValueError):
             return "Unknown"
-    
+
     def _format_time(self, seconds):
         """Format seconds into readable time string."""
         try:
@@ -1526,7 +1654,7 @@ class DownloadManager:
         download_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
         }
         if headers:
             download_headers.update(headers)
@@ -1565,15 +1693,15 @@ class DownloadManager:
             except Exception:
                 pass
 
-            content_type = head_resp.headers.get('content-type', '').lower()
-            total_size = int(head_resp.headers.get('content-length', 0))
-            accept_ranges = head_resp.headers.get('accept-ranges', '').lower() == 'bytes'
-            
+            content_type = head_resp.headers.get("content-type", "").lower()
+            total_size = int(head_resp.headers.get("content-length", 0))
+            accept_ranges = head_resp.headers.get("accept-ranges", "").lower() == "bytes"
+
             # Reject obvious error pages
-            if 'text/html' in content_type and total_size < 1024 * 1024:
+            if "text/html" in content_type and total_size < 1024 * 1024:
                 self._log(f"Rejected HTML response ({total_size} bytes)", level="ERROR")
                 return False
-            
+
             # Choose strategy based on server capabilities
             if accept_ranges and total_size > 0:
                 existing = 0
@@ -1595,7 +1723,7 @@ class DownloadManager:
                 return self._single_threaded_download(
                     url, output_path, download_headers, task, total_size
                 )
-                
+
         except Exception as e:
             self._log(f"Direct download failed: {e}", level="ERROR")
             # Partial file retained intentionally — allows yt-dlp --continue on retry
@@ -1614,14 +1742,17 @@ class DownloadManager:
         cmd = [
             aria2c_exe,
             url,
-            "-d", directory,
-            "-o", filename,
+            "-d",
+            directory,
+            "-o",
+            filename,
             "--allow-overwrite=true",
             "--auto-file-allocation=none",
             "--max-connection-per-server=16",
             "--split=16",
             "--min-split-size=1M",
-            "--user-agent=" + (headers.get("User-Agent") or headers.get("user-agent") or "Mozilla/5.0"),
+            "--user-agent="
+            + (headers.get("User-Agent") or headers.get("user-agent") or "Mozilla/5.0"),
             "--check-certificate=false",
             "--connect-timeout=10",
             "--timeout=30",
@@ -1638,6 +1769,7 @@ class DownloadManager:
                 cmd.append(f"--referer={ref}")
 
         try:
+
             def _on_connecting():
                 with self.lock:
                     task["status_message"] = "Connecting (aria2)..."
@@ -1671,18 +1803,18 @@ class DownloadManager:
         num_threads = min(16, max(4, total_size // (5 * 1024 * 1024)))
         if num_threads < 2 or total_size < 2 * 1024 * 1024:
             return self._single_threaded_download(url, output_path, headers, task, total_size)
-        
+
         chunk_size = total_size // num_threads
-        
+
         # Pre-allocate file
         try:
-            with open(output_path, 'wb') as f:
+            with open(output_path, "wb") as f:
                 f.seek(total_size - 1)
-                f.write(b'\0')
+                f.write(b"\0")
         except OSError as e:
             self._log(f"Cannot pre-allocate file: {e}", level="ERROR")
             return False
-        
+
         progress = {"downloaded": 0, "last_update": time.time()}
         progress_lock = threading.Lock()
         errors = []
@@ -1692,7 +1824,7 @@ class DownloadManager:
             """Download a specific byte range."""
             chunk_headers = headers.copy()
             chunk_headers["Range"] = f"bytes={start}-{end}"
-            
+
             try:
                 session = self._build_session()
                 with session.get(
@@ -1703,7 +1835,7 @@ class DownloadManager:
                     verify=True,
                 ) as resp:
                     resp.raise_for_status()
-                    
+
                     with open(output_path, "r+b") as f:
                         f.seek(start)
                         for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1 MB chunks
@@ -1713,7 +1845,7 @@ class DownloadManager:
                                 f.write(chunk)
                                 with progress_lock:
                                     progress["downloaded"] += len(chunk)
-                                    
+
                                     # Update progress every second
                                     now = time.time()
                                     if now - progress["last_update"] > 0.5:
@@ -1738,7 +1870,7 @@ class DownloadManager:
                     start = i * chunk_size
                     end = (i + 1) * chunk_size - 1 if i < num_threads - 1 else total_size - 1
                     futures.append(executor.submit(download_chunk, start, end, i))
-                
+
                 # Wait for all with timeout
                 results = []
                 for future in as_completed(futures):
@@ -1751,12 +1883,14 @@ class DownloadManager:
             else:
                 self._log(f"Parallel download had errors: {errors}", level="ERROR")
                 return False
-                
+
         except Exception as e:
             self._log(f"Parallel download failed: {e}", level="ERROR")
             return False
 
-    def _single_threaded_download(self, url, output_path, headers, task, expected_size=0, resume_from=0):  # NOSONAR
+    def _single_threaded_download(
+        self, url, output_path, headers, task, expected_size=0, resume_from=0
+    ):  # NOSONAR
         """Reliable single-threaded fallback download with retry on connection reset."""
         max_retries = 3
         for dl_attempt in range(max_retries):
@@ -1774,32 +1908,33 @@ class DownloadManager:
                     timeout=60,
                     verify=True,
                 ) as resp:
-                    
                     if resp.status_code not in [200, 206]:
                         self._log(f"HTTP {resp.status_code}", level="ERROR")
                         return False
-                    
+
                     # Check content type
-                    content_type = resp.headers.get('content-type', '').lower()
-                    if 'text/html' in content_type:
+                    content_type = resp.headers.get("content-type", "").lower()
+                    if "text/html" in content_type:
                         self._log("Got HTML instead of video", level="ERROR")
                         return False
-                    
-                    total = int(resp.headers.get('content-length', expected_size))
+
+                    total = int(resp.headers.get("content-length", expected_size))
                     if current_resume > 0 and resp.status_code == 206:
                         total = current_resume + total
                     downloaded = current_resume if current_resume > 0 else 0
                     last_update = time.time()
-                    
-                    mode = 'ab' if current_resume > 0 else 'wb'
+
+                    mode = "ab" if current_resume > 0 else "wb"
                     with open(output_path, mode) as f:
-                        for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):  # 8 MB → fewer syscalls
+                        for chunk in resp.iter_content(
+                            chunk_size=8 * 1024 * 1024
+                        ):  # 8 MB → fewer syscalls
                             if not self.running:
                                 return False
                             if chunk:
                                 f.write(chunk)
                                 downloaded += len(chunk)
-                                
+
                                 now = time.time()
                                 if now - last_update > 0.5:
                                     with self.lock:
@@ -1811,12 +1946,14 @@ class DownloadManager:
                                         self._update_display_fields(task)
                                         self._save()
                                     last_update = now
-                
+
                 return True
-                
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.ChunkedEncodingError,
-                    OSError) as e:
+
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                OSError,
+            ) as e:
                 if dl_attempt < max_retries - 1:
                     # Resume from where we left off for retriable errors
                     if os.path.exists(output_path):
@@ -1824,11 +1961,17 @@ class DownloadManager:
                             resume_from = os.path.getsize(output_path)
                         except OSError:
                             resume_from = 0
-                    wait = 2 ** dl_attempt
-                    self._log(f"Connection reset, retrying in {wait}s (attempt {dl_attempt + 2}/{max_retries})...", level="WARNING")
+                    wait = 2**dl_attempt
+                    self._log(
+                        f"Connection reset, retrying in {wait}s (attempt {dl_attempt + 2}/{max_retries})...",
+                        level="WARNING",
+                    )
                     time.sleep(wait)
                     continue
-                self._log(f"Single-threaded download error after {max_retries} attempts: {e}", level="ERROR")
+                self._log(
+                    f"Single-threaded download error after {max_retries} attempts: {e}",
+                    level="ERROR",
+                )
                 return False
             except Exception as e:
                 if "timeout" in str(e).lower():
@@ -1842,7 +1985,7 @@ class DownloadManager:
         """Safely remove a file with retries."""
         if not path or not os.path.exists(path):
             return
-            
+
         for attempt in range(3):
             try:
                 os.remove(path)
@@ -1860,7 +2003,7 @@ class DownloadManager:
             base = os.path.basename(output_path)
             prefix = base.split("_")[0]  # temp_id
             for fname in os.listdir(directory):
-                if fname.startswith(prefix) and fname.endswith(('.part', '.ytdl', '.temp')):
+                if fname.startswith(prefix) and fname.endswith((".part", ".ytdl", ".temp")):
                     try:
                         os.remove(os.path.join(directory, fname))
                     except OSError:
@@ -1874,7 +2017,7 @@ class DownloadManager:
             # Clean up internal tracking fields (not needed in saved state)
             for key in ["_frag_current", "_frag_total", "_base_progress"]:
                 task.pop(key, None)
-            
+
             if success:
                 task["status"] = "muxing"
                 task["progress"] = 100
@@ -1884,7 +2027,7 @@ class DownloadManager:
                 task["status"] = "error"
                 task["error_log"] = error_msg or "Unknown error"
             self._save(force=True)
-        
+
         if success:
             try:
                 self._organize_download(task, temp_path)
@@ -1895,6 +2038,7 @@ class DownloadManager:
                 if _provider:
                     try:
                         from src.utils.validator import report_source_result
+
                         report_source_result(_provider, True)
                     except Exception:
                         pass
@@ -1910,20 +2054,25 @@ class DownloadManager:
             if _provider:
                 try:
                     from src.utils.validator import report_source_result
+
                     report_source_result(_provider, False)
                 except Exception:
                     pass
 
     def _notify_completion(self, title: str, success: bool = True):  # NOSONAR
         """Send a desktop notification when a download finishes."""
-        msg   = f"\u2705 Download complete: {title}" if success else f"\u274c Download failed: {title}"
-        icon  = "cinema-cli"
+        msg = (
+            f"\u2705 Download complete: {title}" if success else f"\u274c Download failed: {title}"
+        )
+        icon = "cinema-cli"
+
         def _fire():
             try:
                 if sys.platform == "win32":
                     # Try winotify first, then plyer, then toast fallbacks
                     try:
                         from winotify import Notification, audio  # type: ignore
+
                         toast = Notification(
                             app_id=APP_NAME,
                             title=APP_NAME,
@@ -1936,20 +2085,21 @@ class DownloadManager:
                         pass
                     try:
                         from plyer import notification as _plyer  # type: ignore
+
                         _plyer.notify(title=APP_NAME, message=msg, timeout=6)
                         return
                     except ImportError:
                         pass
                     # Last resort: PowerShell toast (no extra deps)
                     ps_cmd = (
-                        f'[Windows.UI.Notifications.ToastNotificationManager, '
-                        f'Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null;'
-                        f'$t="""<toast><visual><binding template=\"ToastText01\">'
-                        f'<text id=\"1\">{msg}</text></binding></visual></toast>""";'
-                        f'$x=[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, '
-                        f'ContentType=WindowsRuntime]::New();$x.LoadXml($t);'
-                        f'$n=[Windows.UI.Notifications.ToastNotification]::New($x);'
-                        f'[Windows.UI.Notifications.ToastNotificationManager]'
+                        f"[Windows.UI.Notifications.ToastNotificationManager, "
+                        f"Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null;"
+                        f'$t="""<toast><visual><binding template="ToastText01">'
+                        f'<text id="1">{msg}</text></binding></visual></toast>""";'
+                        f"$x=[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, "
+                        f"ContentType=WindowsRuntime]::New();$x.LoadXml($t);"
+                        f"$n=[Windows.UI.Notifications.ToastNotification]::New($x);"
+                        f"[Windows.UI.Notifications.ToastNotificationManager]"
                         f'::CreateToastNotifier("{APP_NAME}").Show($n)'
                     )
                     _kw = {}
@@ -1957,21 +2107,29 @@ class DownloadManager:
                         _kw["creationflags"] = subprocess.CREATE_NO_WINDOW
                     subprocess.run(
                         ["powershell", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-                        capture_output=True, timeout=5, **_kw,
+                        capture_output=True,
+                        timeout=5,
+                        **_kw,
                     )
                 elif sys.platform == "darwin":
                     subprocess.run(
-                        ["osascript", "-e",
-                         f'display notification "{msg}" with title "{APP_NAME}"'],
-                        capture_output=True, timeout=5,
+                        [
+                            "osascript",
+                            "-e",
+                            f'display notification "{msg}" with title "{APP_NAME}"',
+                        ],
+                        capture_output=True,
+                        timeout=5,
                     )
                 else:
                     subprocess.run(
                         ["notify-send", "-a", APP_NAME, "-i", icon, APP_NAME, msg],
-                        capture_output=True, timeout=5,
+                        capture_output=True,
+                        timeout=5,
                     )
             except Exception:
                 pass  # Notifications are best-effort — never crash the downloader
+
         threading.Thread(target=_fire, daemon=True).start()
 
     def get_queue(self):
@@ -1985,7 +2143,9 @@ class DownloadManager:
             return 3
 
         with self.lock:
-            return sorted(self.queue, key=lambda x: (_status_rank(x["status"]), x.get("added_at", 0)))
+            return sorted(
+                self.queue, key=lambda x: (_status_rank(x["status"]), x.get("added_at", 0))
+            )
 
     def retry_task(self, task_id):
         with self.lock:
@@ -2016,7 +2176,6 @@ class DownloadManager:
                 self._save()
             return changed
 
-    
     def _organize_download(self, task, temp_file_path):  # NOSONAR
         """Move downloaded file (and any downloaded subtitles) into the user's downloads folder."""
         if not temp_file_path or not os.path.exists(temp_file_path):
@@ -2043,7 +2202,9 @@ class DownloadManager:
         os.makedirs(dest_dir, exist_ok=True)
 
         # If the task filename is just a name, keep that base name; otherwise use the temp file basename
-        desired_name = os.path.basename(task.get("filename") or "") or os.path.basename(temp_file_path)
+        desired_name = os.path.basename(task.get("filename") or "") or os.path.basename(
+            temp_file_path
+        )
         # Ensure extension matches the downloaded file
         _, dl_ext = os.path.splitext(temp_file_path)
         base, ext = os.path.splitext(desired_name)
@@ -2088,22 +2249,54 @@ class DownloadManager:
                 task["subtitle_file"] = moved_subs[0]["path"]
             self._save()
 
-    
     # ISO 639-2/T three-letter codes — MP4 containers (mdhd atom) require
     # three-letter language codes.  Two-letter codes silently fail to persist
     # in some ffmpeg builds, resulting in tracks with no language metadata.
     _LANG_TO_ISO639_2 = {
-        "ar": "ara", "en": "eng", "fr": "fra", "es": "spa",
-        "de": "deu", "tr": "tur", "pt": "por", "it": "ita",
-        "zh": "zho", "ja": "jpn", "ko": "kor", "hi": "hin",
-        "ru": "rus", "nl": "nld", "pl": "pol", "sv": "swe",
-        "no": "nor", "da": "dan", "fi": "fin", "el": "ell",
-        "he": "heb", "ro": "ron", "hu": "hun", "cs": "ces",
-        "th": "tha", "vi": "vie", "id": "ind", "ms": "msa",
-        "uk": "ukr", "bg": "bul", "hr": "hrv", "sr": "srp",
-        "sk": "slk", "sl": "slv", "et": "est", "lv": "lav",
-        "lt": "lit", "fa": "fas", "ur": "urd", "bn": "ben",
-        "ta": "tam", "te": "tel", "ml": "mal", "sw": "swa",
+        "ar": "ara",
+        "en": "eng",
+        "fr": "fra",
+        "es": "spa",
+        "de": "deu",
+        "tr": "tur",
+        "pt": "por",
+        "it": "ita",
+        "zh": "zho",
+        "ja": "jpn",
+        "ko": "kor",
+        "hi": "hin",
+        "ru": "rus",
+        "nl": "nld",
+        "pl": "pol",
+        "sv": "swe",
+        "no": "nor",
+        "da": "dan",
+        "fi": "fin",
+        "el": "ell",
+        "he": "heb",
+        "ro": "ron",
+        "hu": "hun",
+        "cs": "ces",
+        "th": "tha",
+        "vi": "vie",
+        "id": "ind",
+        "ms": "msa",
+        "uk": "ukr",
+        "bg": "bul",
+        "hr": "hrv",
+        "sr": "srp",
+        "sk": "slk",
+        "sl": "slv",
+        "et": "est",
+        "lv": "lav",
+        "lt": "lit",
+        "fa": "fas",
+        "ur": "urd",
+        "bn": "ben",
+        "ta": "tam",
+        "te": "tel",
+        "ml": "mal",
+        "sw": "swa",
     }
 
     @classmethod
@@ -2145,7 +2338,8 @@ class DownloadManager:
         # Priority: 1) same venv as the running interpreter  2) PATH
         ffsubsync_exe = None
         venv_candidate = os.path.join(
-            os.path.dirname(sys.executable), "ffsubsync.exe" if sys.platform == "win32" else "ffsubsync"
+            os.path.dirname(sys.executable),
+            "ffsubsync.exe" if sys.platform == "win32" else "ffsubsync",
         )
         if os.path.isfile(venv_candidate):
             ffsubsync_exe = venv_candidate
@@ -2156,7 +2350,8 @@ class DownloadManager:
             try:
                 probe = subprocess.run(
                     [sys.executable, "-c", "import ffsubsync"],
-                    capture_output=True, timeout=10,
+                    capture_output=True,
+                    timeout=10,
                 )
                 if probe.returncode == 0:
                     ffsubsync_exe = "__module__"  # sentinel: invoke via python -m
@@ -2184,17 +2379,23 @@ class DownloadManager:
             try:
                 if ffsubsync_exe == "__module__":
                     cmd = [
-                        sys.executable, "-m", "ffsubsync",
+                        sys.executable,
+                        "-m",
+                        "ffsubsync",
                         video_path,
-                        "-i", sub_path,
-                        "-o", synced_path,
+                        "-i",
+                        sub_path,
+                        "-o",
+                        synced_path,
                     ]
                 else:
                     cmd = [
                         ffsubsync_exe,
                         video_path,
-                        "-i", sub_path,
-                        "-o", synced_path,
+                        "-i",
+                        sub_path,
+                        "-o",
+                        synced_path,
                     ]
 
                 # ffsubsync typically takes 10–60 s per file (audio extraction
@@ -2244,7 +2445,9 @@ class DownloadManager:
                             pass
 
             except subprocess.TimeoutExpired:
-                self._log(f"  [{lang}] ffsubsync timed out (90s) — keeping original", level="WARNING")
+                self._log(
+                    f"  [{lang}] ffsubsync timed out (90s) — keeping original", level="WARNING"
+                )
                 if os.path.exists(synced_path):
                     try:
                         os.remove(synced_path)
@@ -2323,7 +2526,10 @@ class DownloadManager:
         try:
             self._sync_subtitles_to_video(video_file, subs)
         except Exception as e:
-            self._log(f"Subtitle sync step failed ({e}) — continuing with original timing", level="WARNING")
+            self._log(
+                f"Subtitle sync step failed ({e}) — continuing with original timing",
+                level="WARNING",
+            )
 
         is_mp4 = video_file.lower().endswith(".mp4")
         temp_out = video_file + (".tmp.mp4" if is_mp4 else ".tmp.mkv")
@@ -2335,9 +2541,11 @@ class DownloadManager:
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
             "-y",
-            "-i", video_file,
+            "-i",
+            video_file,
         ]
         for s in subs:
             cmd.extend(["-i", s["path"]])
@@ -2363,7 +2571,7 @@ class DownloadManager:
         # correctly — two-letter codes silently fail in some ffmpeg builds.
         for idx, s in enumerate(subs):
             lang3 = self._to_iso639_2(s.get("lang") or "und")
-            name  = s.get("name") or lang3
+            name = s.get("name") or lang3
             cmd.extend([f"-metadata:s:s:{idx}", f"language={lang3}"])
             cmd.extend([f"-metadata:s:s:{idx}", f"title={name}"])
             # First subtitle track is the default; others are not.
@@ -2390,8 +2598,20 @@ class DownloadManager:
             if sys.platform == "win32":
                 _mux_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
             mux_ok = False
-            process = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=mux_timeout, **_mux_kw)
-            if process.returncode == 0 and os.path.exists(temp_out) and os.path.getsize(temp_out) > 5 * 1024 * 1024:
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=mux_timeout,
+                **_mux_kw,
+            )
+            if (
+                process.returncode == 0
+                and os.path.exists(temp_out)
+                and os.path.getsize(temp_out) > 5 * 1024 * 1024
+            ):
                 mux_ok = True
             else:
                 # First attempt failed — retry with lenient flags for truncated streams.
@@ -2399,16 +2619,25 @@ class DownloadManager:
                 # packets in the video, but do NOT add genpts/discardcorrupt/
                 # avoid_negative_ts which destroy subtitle sync.
                 err = (process.stderr or "").strip() or "Unknown ffmpeg error"
-                self._log(f"FFmpeg mux attempt 1 failed ({err}), retrying with lenient flags...", level="WARNING")
+                self._log(
+                    f"FFmpeg mux attempt 1 failed ({err}), retrying with lenient flags...",
+                    level="WARNING",
+                )
                 if os.path.exists(temp_out):
                     try:
                         os.remove(temp_out)
                     except Exception:
                         pass
                 retry_cmd = [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-err_detect", "ignore_err",
-                    "-y", "-i", video_file,
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-err_detect",
+                    "ignore_err",
+                    "-y",
+                    "-i",
+                    video_file,
                 ]
                 for s in subs:
                     retry_cmd.extend(["-i", s["path"]])
@@ -2421,17 +2650,31 @@ class DownloadManager:
                 retry_cmd.extend(["-map_metadata", "0"])
                 for idx, s in enumerate(subs):
                     lang3 = self._to_iso639_2(s.get("lang") or "und")
-                    name  = s.get("name") or lang3
+                    name = s.get("name") or lang3
                     retry_cmd.extend([f"-metadata:s:s:{idx}", f"language={lang3}"])
                     retry_cmd.extend([f"-metadata:s:s:{idx}", f"title={name}"])
                     retry_cmd.extend([f"-disposition:s:{idx}", "default" if idx == 0 else "0"])
                 retry_cmd.append(temp_out)
                 try:
-                    p2 = subprocess.run(retry_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=mux_timeout, **_mux_kw)
-                    if p2.returncode == 0 and os.path.exists(temp_out) and os.path.getsize(temp_out) > 5 * 1024 * 1024:
+                    p2 = subprocess.run(
+                        retry_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="ignore",
+                        timeout=mux_timeout,
+                        **_mux_kw,
+                    )
+                    if (
+                        p2.returncode == 0
+                        and os.path.exists(temp_out)
+                        and os.path.getsize(temp_out) > 5 * 1024 * 1024
+                    ):
                         mux_ok = True
                     else:
-                        self._log(f"FFmpeg mux retry also failed for {task.get('title')}", level="WARNING")
+                        self._log(
+                            f"FFmpeg mux retry also failed for {task.get('title')}", level="WARNING"
+                        )
                 except Exception:
                     pass
 
@@ -2451,7 +2694,10 @@ class DownloadManager:
                         pass
             else:
                 # Keep original file and external subs; clean temp output
-                self._log(f"FFmpeg mux failed for {task.get('title')}: subtitles kept as external files", level="WARNING")
+                self._log(
+                    f"FFmpeg mux failed for {task.get('title')}: subtitles kept as external files",
+                    level="WARNING",
+                )
                 if os.path.exists(temp_out):
                     try:
                         os.remove(temp_out)

@@ -1,5 +1,4 @@
 import os
-import sys
 
 from src.config import APP_VERSION, BACKEND_URL, SETTINGS_FILE
 from src.state.app_state import AppState
@@ -69,7 +68,9 @@ class AppController:
             flag in self.state.argv for flag in ("--debug-source", "--debug-subtitle", "--smoke")
         )
         boot_settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
-        self.state.backend_url = boot_settings.get("backend") or os.getenv("BACKEND_URL") or BACKEND_URL
+        self.state.backend_url = (
+            boot_settings.get("backend") or os.getenv("BACKEND_URL") or BACKEND_URL
+        )
 
     def _handle_simple_flags(self) -> bool:
         argv = self.state.argv

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 
 def canonicalize_quality(quality: str) -> str:
@@ -69,8 +69,8 @@ def quality_sort_key(quality: str) -> int:
     return 6
 
 
-def sort_manifest_qualities(files: List[Dict[str, Any]]) -> List[str]:
-    qualities: List[str] = []
+def sort_manifest_qualities(files: list[dict[str, Any]]) -> list[str]:
+    qualities: list[str] = []
     for item in files or []:
         q = canonicalize_quality(item.get("quality")) if isinstance(item, dict) else None
         if q and q not in qualities:
@@ -80,15 +80,15 @@ def sort_manifest_qualities(files: List[Dict[str, Any]]) -> List[str]:
 
 
 def build_quality_menu_options(
-    files: List[Dict[str, Any]], include_adaptive: bool = False
-) -> List[Dict[str, str]]:
+    files: list[dict[str, Any]], include_adaptive: bool = False
+) -> list[dict[str, str]]:
     """Build quality menu from qualities actually detected for this title.
 
     If providers do not expose quality tags, only Auto/Adaptive are shown.
     """
     qualities = [q for q in sort_manifest_qualities(files) if (q or "").lower() != "unknown"]
 
-    options: List[Dict[str, str]] = [{"name": "✨ Best Available (Auto)", "value": "auto"}]
+    options: list[dict[str, str]] = [{"name": "✨ Best Available (Auto)", "value": "auto"}]
     if include_adaptive:
         options.append({"name": "🔄 Adaptive (match connection speed)", "value": "adaptive"})
 
@@ -98,8 +98,8 @@ def build_quality_menu_options(
 
 
 def filter_sources_for_quality(
-    files: List[Dict[str, Any]], selected_quality: str
-) -> Tuple[List[Dict[str, Any]], str]:
+    files: list[dict[str, Any]], selected_quality: str
+) -> tuple[list[dict[str, Any]], str]:
     """Filter sources by quality using deterministic rules.
 
     Returns: (filtered_files, mode)
@@ -119,20 +119,28 @@ def filter_sources_for_quality(
         for f in sources
     )
     exact = [
-        f for f in sources
+        f
+        for f in sources
         if isinstance(f, dict) and canonicalize_quality(f.get("quality")) == target_quality
     ]
 
     if exact:
         return exact, "ok_exact"
-    
+
     if has_quality_tags:
         target_rank = quality_sort_key(target_quality)
         ranked = sorted(
             sources,
             key=lambda f: (
-                abs(quality_sort_key(canonicalize_quality(f.get("quality") if isinstance(f, dict) else "")) - target_rank),
-                quality_sort_key(canonicalize_quality(f.get("quality") if isinstance(f, dict) else "")),
+                abs(
+                    quality_sort_key(
+                        canonicalize_quality(f.get("quality") if isinstance(f, dict) else "")
+                    )
+                    - target_rank
+                ),
+                quality_sort_key(
+                    canonicalize_quality(f.get("quality") if isinstance(f, dict) else "")
+                ),
             ),
         )
         return ranked, "fallback_tagged"

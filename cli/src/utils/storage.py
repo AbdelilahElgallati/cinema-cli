@@ -18,17 +18,19 @@ def load_json_data(filepath, default=None, expected_type=None):
         return default
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             data = json.load(f)
         if expected_type is not None and not isinstance(data, expected_type):
             return default
         return data
     except (json.JSONDecodeError, OSError) as e:
         from src.utils import app_logger
+
         app_logger.debug(f"Error loading {filepath}: {e}")
         return default
     except Exception as e:
         from src.utils import app_logger
+
         app_logger.warning(f"Unexpected error loading {filepath}: {e}")
         return default
 
@@ -41,6 +43,7 @@ def save_json_data(filepath, data):
         os.replace(tmp_path, filepath)
     except (json.JSONDecodeError, OSError) as e:
         from src.utils import app_logger
+
         app_logger.error(f"Error saving {filepath}: {e}")
         if os.path.exists(tmp_path):
             try:
@@ -49,6 +52,7 @@ def save_json_data(filepath, data):
                 pass
     except Exception as e:
         from src.utils import app_logger
+
         app_logger.error(f"Unexpected error saving {filepath}: {e}")
         if os.path.exists(tmp_path):
             try:

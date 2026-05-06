@@ -48,7 +48,8 @@ class QueueManager:
             "subtitles": subtitles,
             "preferred_sub_lang": preferred_sub_lang,
             "include_all_subs": include_all_subs,
-            "preferred_sub_langs": preferred_sub_langs or ([preferred_sub_lang] if preferred_sub_lang else ["ar"]),
+            "preferred_sub_langs": preferred_sub_langs
+            or ([preferred_sub_lang] if preferred_sub_lang else ["ar"]),
             "fallback_sub_langs": fallback_sub_langs,
             "headers": headers,
             "meta": meta,

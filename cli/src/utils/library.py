@@ -25,9 +25,10 @@ def clear_library_cache(directory=None):
     for key in stale_keys:
         _SCAN_CACHE.pop(key, None)
 
+
 def get_video_files(directory):
     """Recursively find all video files in the given directory."""
-    video_extensions = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv')
+    video_extensions = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv")
     video_files = []
     for root, _, files in os.walk(directory):
         for file in files:
@@ -41,6 +42,7 @@ def get_video_files(directory):
                     pass
     return video_files
 
+
 def parse_media_info(file_path):
     """
     Parses title, season, and episode info from a filename.
@@ -49,20 +51,20 @@ def parse_media_info(file_path):
     filename = os.path.basename(file_path)
     # Remove extension
     name, _ = os.path.splitext(filename)
-    
+
     # TV Show patterns: S01E01, 1x01, s1e1
     tv_regex = re.compile(r"(?i)s(?P<season>\d+)e(?P<episode>\d+)")
     tv_regex_alt = re.compile(r"(?P<season>\d+)x(?P<episode>\d+)")
-    
+
     match = tv_regex.search(name) or tv_regex_alt.search(name)
-    
+
     if match:
         # Extract title (everything before the match)
-        title_raw = name[:match.start()].strip(" .-_")
+        title_raw = name[: match.start()].strip(" .-_")
         if not title_raw:
             # If empty, try parent directory name
             title_raw = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
-            
+
         return {
             "type": "tv",
             "title": title_raw.replace(".", " ").replace("_", " "),
@@ -70,32 +72,33 @@ def parse_media_info(file_path):
             "episode": int(match.group("episode")),
             "path": file_path,
             "filename": filename,
-            "size": os.path.getsize(file_path)
+            "size": os.path.getsize(file_path),
         }
-    
+
     # Movie pattern: Title (Year) or just Title
     year_regex = re.compile(r"\((?P<year>(19|20)\d{2})\)")
     match_year = year_regex.search(name)
-    
+
     if match_year:
-        title_raw = name[:match_year.start()].strip(" .-_")
+        title_raw = name[: match_year.start()].strip(" .-_")
         return {
             "type": "movie",
             "title": title_raw.replace(".", " ").replace("_", " "),
             "year": match_year.group("year"),
             "path": file_path,
             "filename": filename,
-            "size": os.path.getsize(file_path)
+            "size": os.path.getsize(file_path),
         }
-    
+
     # Fallback: assume movie
     return {
         "type": "movie",
         "title": name.replace(".", " ").replace("_", " "),
         "path": file_path,
         "filename": filename,
-        "size": os.path.getsize(file_path)
+        "size": os.path.getsize(file_path),
     }
+
 
 def _file_sig(file_path):
     """Return a lightweight file signature for cache validity checks."""
@@ -124,8 +127,16 @@ def _cache_media_details(file_path, details):
 
 def _probe_resolution(ffprobe, file_path):
     cmd = [
-        ffprobe, "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height", "-of", "csv=p=0", file_path,
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0",
+        file_path,
     ]
     res = subprocess.check_output(cmd, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
     if not res or "," not in res:
@@ -136,10 +147,20 @@ def _probe_resolution(ffprobe, file_path):
 
 def _probe_subtitles(ffprobe, file_path):
     cmd_sub = [
-        ffprobe, "-v", "error", "-select_streams", "s",
-        "-show_entries", "stream=index:stream_tags=language,title", "-of", "csv=p=0", file_path,
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "s",
+        "-show_entries",
+        "stream=index:stream_tags=language,title",
+        "-of",
+        "csv=p=0",
+        file_path,
     ]
-    sub_res = subprocess.check_output(cmd_sub, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
+    sub_res = subprocess.check_output(
+        cmd_sub, universal_newlines=True, stderr=subprocess.DEVNULL
+    ).strip()
     if not sub_res:
         return []
     return [line.strip() for line in sub_res.split("\n") if line.strip()]
@@ -155,7 +176,7 @@ def get_media_details(file_path, use_cache=True):
     ffprobe = find_executable("ffprobe")
     if not ffprobe:
         return {"resolution": "Unknown", "subtitles": []}
-    
+
     try:
         resolution = _probe_resolution(ffprobe, file_path)
         subtitles = _probe_subtitles(ffprobe, file_path)
@@ -205,37 +226,35 @@ def scan_library(directory, include_details=False, use_cache=True):
         cached_scan = _get_cached_scan(cache_key)
         if cached_scan is not None:
             return cached_scan
-        
+
     files = get_video_files(directory)
     movies = []
-    tv_shows = {} # title -> { season -> [episodes] }
-    
+    tv_shows = {}  # title -> { season -> [episodes] }
+
     for f in files:
         info = parse_media_info(f)
         if include_details:
             details = get_media_details(f)
             info.update(details)
-        
+
         if info["type"] == "movie":
             movies.append(info)
         else:
             _append_tv_episode(tv_shows, info)
-            
+
     _sort_tv_episodes(tv_shows)
-            
-    result = {
-        "movies": sorted(movies, key=lambda x: x["title"]),
-        "tv": tv_shows
-    }
+
+    result = {"movies": sorted(movies, key=lambda x: x["title"]), "tv": tv_shows}
 
     if use_cache:
         _SCAN_CACHE[cache_key] = (time.time(), result)
 
     return result
 
+
 def format_size(bytes):
     """Converts bytes to human readable format."""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
         if bytes < 1024.0:
             return f"{bytes:.2f} {unit}"
         bytes /= 1024.0

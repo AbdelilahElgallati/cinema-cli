@@ -1,11 +1,13 @@
 import os
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from src.config import BACKEND_URL, TMDB_API_KEY
 from src.utils.api import APIClient
-from src.config import TMDB_API_KEY, BACKEND_URL
+
 
 def test_single():
-    tmdb_id = 121091 # The Last of Us
+    tmdb_id = 121091  # The Last of Us
     media_type = "tv"
     season = 1
     episode = 1
@@ -16,6 +18,7 @@ def test_single():
     print(f"Found {len(files)} files.")
     for f in files:
         print(f"  - {f.get('provider')}: {f.get('quality')} ({f.get('file')[:50]}...)")
+
 
 if __name__ == "__main__":
     test_single()

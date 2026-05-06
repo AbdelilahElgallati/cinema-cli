@@ -1,9 +1,8 @@
-import os
-import re
 import gzip
 import io
+import os
+import re
 import zipfile
-from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -11,11 +10,11 @@ from src.config import OPENSUBTITLES_API_KEY, SUBDL_API_KEY
 from src.utils.utils import normalize_lang
 
 
-def _get_api_key() -> Optional[str]:
+def _get_api_key() -> str | None:
     return os.getenv("OPENSUBTITLES_API_KEY") or OPENSUBTITLES_API_KEY or None
 
 
-def _get_subdl_key() -> Optional[str]:
+def _get_subdl_key() -> str | None:
     return os.getenv("SUBDL_API_KEY") or SUBDL_API_KEY or None
 
 
@@ -46,9 +45,11 @@ def _request_with_retry(method: str, url: str, **kwargs):
 
     # Honor TLS verification config
     from src.config import DEFAULT_SUBTITLE_VERIFY_TLS
+
     try:
-        from src.utils.storage import load_json_data
         from src.config import SETTINGS_FILE
+        from src.utils.storage import load_json_data
+
         _settings = load_json_data(SETTINGS_FILE) or {}
         _verify_tls = _settings.get("SUBTITLE_VERIFY_TLS", DEFAULT_SUBTITLE_VERIFY_TLS)
     except Exception:
@@ -60,6 +61,7 @@ def _request_with_retry(method: str, url: str, **kwargs):
             r = requests.request(method, url, timeout=timeout, verify=_verify_tls, **kwargs)
             if r.status_code == 429:
                 import time
+
                 # Wait longer on second attempt for 429
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -73,7 +75,7 @@ def _request_with_retry(method: str, url: str, **kwargs):
     return None
 
 
-def _query_variants(title: str) -> List[str]:
+def _query_variants(title: str) -> list[str]:
     """Generate tolerant title variants for subtitle search.
 
     Playback titles can include episode markers (S01E01) and extra labels
@@ -176,15 +178,15 @@ def _extract_zip_subtitle(payload: bytes):
 
 def fetch_subtitles_subdl(
     title: str,
-    languages: List[str],
+    languages: list[str],
     *,
-    year: Optional[int] = None,
-    season: Optional[int] = None,
-    episode: Optional[int] = None,
+    year: int | None = None,
+    season: int | None = None,
+    episode: int | None = None,
     max_per_language: int = 1,
-) -> List[Dict[str, object]]:
+) -> list[dict[str, object]]:
     """Fetch subtitles from SubDL.com as a secondary fallback.
-    
+
     SubDL is particularly good for Arabic/Persian/etc.
     """
     key = _get_subdl_key()
@@ -195,17 +197,19 @@ def fetch_subtitles_subdl(
     queries = _query_variants(title)
     if not queries:
         return []
-        
+
     sd_id = None
     media_type = "tv" if (season or episode) else "movie"
-    
+
     for query in queries:
         params = {"api_key": key, "film_name": query, "type": media_type}
         if year and media_type == "movie":
             params["year"] = year
-            
+
         try:
-            r = _request_with_retry("GET", "https://api.subdl.com/api/v1/subtitles/search", params=params, timeout=8)
+            r = _request_with_retry(
+                "GET", "https://api.subdl.com/api/v1/subtitles/search", params=params, timeout=8
+            )
             if r and r.status_code == 200:
                 data = r.json()
                 if data.get("status") and data.get("results"):
@@ -215,6 +219,7 @@ def fetch_subtitles_subdl(
                         break
         except Exception as e:
             from src.utils import app_logger
+
             app_logger.debug(f"SUBDL Search Error: {e}")
             continue
 
@@ -222,7 +227,7 @@ def fetch_subtitles_subdl(
         return []
 
     # 2. List subtitles for the found ID
-    out: List[Dict[str, object]] = []
+    out: list[dict[str, object]] = []
     langs_str = ",".join([l.upper() for l in languages])
     params = {
         "api_key": key,
@@ -235,10 +240,12 @@ def fetch_subtitles_subdl(
         params["episode"] = episode
 
     try:
-        r = _request_with_retry("GET", "https://api.subdl.com/api/v1/subtitles/list", params=params, timeout=8)
+        r = _request_with_retry(
+            "GET", "https://api.subdl.com/api/v1/subtitles/list", params=params, timeout=8
+        )
         if not r or r.status_code != 200:
             return []
-            
+
         data = r.json()
         if not data.get("status") or not data.get("subtitles"):
             return []
@@ -251,18 +258,18 @@ def fetch_subtitles_subdl(
             for s in subs:
                 if picked >= max_per_language:
                     break
-                
+
                 url = s.get("url")
                 if not url:
                     continue
-                
+
                 # SubDL URLs usually require the API key as a query param or redirect
                 dl_url = f"{url}"
                 if "?" in dl_url:
                     dl_url += f"&api_key={key}"
                 else:
                     dl_url += f"?api_key={key}"
-                
+
                 sr = _request_with_retry("GET", dl_url, timeout=8, attempts=2)
                 if not sr or sr.status_code != 200:
                     continue
@@ -273,9 +280,10 @@ def fetch_subtitles_subdl(
 
                 out.append({"lang": lang_low, "content": content, "ext": ext or "srt"})
                 picked += 1
-                
+
     except Exception as e:
         from src.utils import app_logger
+
         app_logger.debug(f"SUBDL List Error: {e}")
         pass
 
@@ -284,19 +292,19 @@ def fetch_subtitles_subdl(
 
 def fetch_subtitles(  # NOSONAR
     title: str,
-    languages: List[str],
+    languages: list[str],
     *,
-    year: Optional[int] = None,
-    season: Optional[int] = None,
-    episode: Optional[int] = None,
+    year: int | None = None,
+    season: int | None = None,
+    episode: int | None = None,
     max_per_language: int = 1,
-) -> List[Dict[str, object]]:
+) -> list[dict[str, object]]:
     """Fetch subtitles for multiple languages.
-    
+
     Tries OpenSubtitles first, then falls back to SubDL for any language
     that didn't get enough results.
     """
-    final_out: List[Dict[str, object]] = []
+    final_out: list[dict[str, object]] = []
     langs = [normalize_lang(l) for l in (languages or []) if l and str(l).strip()]
     # de-dupe (preserve order)
     seen_langs = set()
@@ -305,16 +313,22 @@ def fetch_subtitles(  # NOSONAR
         return []
 
     # 1. Try OpenSubtitles
-    os_results: List[Dict[str, object]] = []
+    os_results: list[dict[str, object]] = []
     os_key = _get_api_key()
     if os_key:
         try:
             os_results = _fetch_from_opensubtitles(
-                title, langs, year=year, season=season, episode=episode, 
-                max_per_language=max_per_language, key=os_key
+                title,
+                langs,
+                year=year,
+                season=season,
+                episode=episode,
+                max_per_language=max_per_language,
+                key=os_key,
             )
         except Exception as e:
             from src.utils import app_logger
+
             app_logger.error(f"OpenSubtitles lookup failed for '{title}' (langs: {langs}): {e}")
 
     # Add OS results to final_out
@@ -326,12 +340,16 @@ def fetch_subtitles(  # NOSONAR
         count = sum(1 for item in final_out if item["lang"] == lang)
         if count < max_per_language:
             needed_langs.append(lang)
-            
+
     if needed_langs and _get_subdl_key():
         try:
             subdl_results = fetch_subtitles_subdl(
-                title, needed_langs, year=year, season=season, episode=episode, 
-                max_per_language=max_per_language
+                title,
+                needed_langs,
+                year=year,
+                season=season,
+                episode=episode,
+                max_per_language=max_per_language,
             )
             # Merge results, being careful not to exceed max_per_language per lang
             for sr in subdl_results:
@@ -341,6 +359,7 @@ def fetch_subtitles(  # NOSONAR
                     final_out.append(sr)
         except Exception as e:
             from src.utils import app_logger
+
             app_logger.error(f"SubDL lookup failed for '{title}' (langs: {needed_langs}): {e}")
 
     return final_out
@@ -348,14 +367,14 @@ def fetch_subtitles(  # NOSONAR
 
 def _fetch_from_opensubtitles(
     title: str,
-    languages: List[str],
+    languages: list[str],
     *,
-    year: Optional[int] = None,
-    season: Optional[int] = None,
-    episode: Optional[int] = None,
+    year: int | None = None,
+    season: int | None = None,
+    episode: int | None = None,
     max_per_language: int = 1,
     key: str = "",
-) -> List[Dict[str, object]]:
+) -> list[dict[str, object]]:
     """Internal helper for OpenSubtitles logic."""
     headers = {"Api-Key": key, "User-Agent": "cinema-cli v2.0", "Accept": "application/json"}
     langs = [normalize_lang(l) for l in (languages or []) if l and str(l).strip()]
@@ -368,7 +387,7 @@ def _fetch_from_opensubtitles(
     queries = _query_variants(title)
     if not queries:
         return []
-    base_params: Dict[str, object] = {}
+    base_params: dict[str, object] = {}
     if year and not (season or episode):
         base_params["year"] = year
     if season:
@@ -376,16 +395,16 @@ def _fetch_from_opensubtitles(
     if episode:
         base_params["episode_number"] = episode
 
-    out: List[Dict[str, object]] = []
+    out: list[dict[str, object]] = []
     # OpenSubtitles allows comma-separated languages in a single request.
     # We search all at once for each query variant.
     langs_param = ",".join(langs)
-    
+
     for query in queries:
         params = dict(base_params)
         params["query"] = query
         params["languages"] = langs_param
-        
+
         try:
             r = _request_with_retry(
                 "GET",
@@ -407,7 +426,7 @@ def _fetch_from_opensubtitles(
                 attrs = it.get("attributes") or {}
                 # The API returns 'language' as a 2-letter code in attributes
                 sub_lang = normalize_lang(attrs.get("language"))
-                
+
                 # Check if we still need more for this language
                 current_count = sum(1 for x in out if x["lang"] == sub_lang)
                 if current_count >= max_per_language:
@@ -452,6 +471,7 @@ def _fetch_from_opensubtitles(
                 out.append({"lang": sub_lang, "content": content, "ext": ext or "srt"})
         except Exception as e:
             from src.utils import app_logger
+
             app_logger.debug(f"OpenSubtitles query error: {e}")
             continue
 

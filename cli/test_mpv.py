@@ -1,4 +1,4 @@
-﻿import subprocess
+import subprocess
 
 
 def run_probe(arg):
