@@ -35,6 +35,43 @@ function baseTransform(d, e, f) {
   return k || '0';
 }
 
+// Safely parse arguments without eval/new Function
+function parseHunterArgs(str) {
+  const args = [];
+  let current = '';
+  let inString = false;
+  let quote = '';
+  
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inString) {
+      if (c === quote && str[i-1] !== '\\') {
+        inString = false;
+        args.push(current);
+        current = '';
+      } else {
+        current += c;
+      }
+    } else {
+      if (c === '"' || c === "'") {
+        inString = true;
+        quote = c;
+      } else if (c === ',') {
+        if (current.trim() !== '') {
+          args.push(Number(current.trim()));
+          current = '';
+        }
+      } else if (c.trim() !== '') {
+        current += c;
+      }
+    }
+  }
+  if (current.trim() !== '') {
+    args.push(Number(current.trim()));
+  }
+  return args;
+}
+
 function decodeHunter(h, u, n, t, e, r = '') {
   let i = 0;
   while (i < h.length) {
@@ -124,16 +161,11 @@ export async function getMultiembed(params) {
     let videoUrl = null;
 
     if (hunterMatch) {
-      // old method
       let dataArray;
       try {
-        dataArray = new Function('return [' + hunterMatch[1] + ']')();
-      } catch (evalError) {
-        try {
-          dataArray = eval('[' + hunterMatch[1] + ']');
-        } catch (fallbackError) {
-          throw new Error(`Failed to parse hunter pack: ${fallbackError.message}`);
-        }
+        dataArray = parseHunterArgs(hunterMatch[1]);
+      } catch (err) {
+        throw new Error(`Failed to parse hunter pack: ${err.message}`);
       }
 
       if (!Array.isArray(dataArray) || dataArray.length < 6) {

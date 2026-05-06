@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from src.config import OPENSUBTITLES_API_KEY, SUBDL_API_KEY
+from src.utils.utils import normalize_lang
 
 
 def _get_api_key() -> Optional[str]:
@@ -26,24 +27,45 @@ def _looks_like_subtitle(payload: bytes) -> bool:
     low = head.lower()
     if b"<html" in low or b"<!doctype html" in low:
         return False
-    # Accept common subtitle patterns (srt/vtt/ass) and HLS manifests
+    # Accept common subtitle patterns (srt/vtt/ass)
+    head_upper = head.upper()
     return (
-        (b"WEBVTT" in head)
+        (b"WEBVTT" in head_upper)
         or (b" --> " in head)
-        or (b"{\\an" in head)
-        or (b"Dialogue:" in head)
-        or (b"#EXTM3U" in head.upper())
+        or (b"{\\AN" in head_upper)
+        or (b"DIALOGUE:" in head_upper)
     )
 
 
 def _request_with_retry(method: str, url: str, **kwargs):
-    """Small retry helper for transient OpenSubtitles/network failures."""
+    """Small retry helper for transient OpenSubtitles/network failures.
+    Includes special handling for 429 (Too Many Requests).
+    """
     attempts = int(kwargs.pop("attempts", 2) or 2)
     timeout = kwargs.pop("timeout", 15)
+
+    # Honor TLS verification config
+    from src.config import DEFAULT_SUBTITLE_VERIFY_TLS
+    try:
+        from src.utils.storage import load_json_data
+        from src.config import SETTINGS_FILE
+        _settings = load_json_data(SETTINGS_FILE) or {}
+        _verify_tls = _settings.get("SUBTITLE_VERIFY_TLS", DEFAULT_SUBTITLE_VERIFY_TLS)
+    except Exception:
+        _verify_tls = DEFAULT_SUBTITLE_VERIFY_TLS
+
     last_exc = None
-    for _ in range(max(1, attempts)):
+    for attempt in range(max(1, attempts)):
         try:
-            return requests.request(method, url, timeout=timeout, **kwargs)
+            r = requests.request(method, url, timeout=timeout, verify=_verify_tls, **kwargs)
+            if r.status_code == 429:
+                import time
+                # Wait longer on second attempt for 429
+                time.sleep(2 * (attempt + 1))
+                continue
+            if r.status_code >= 400:
+                continue
+            return r
         except requests.RequestException as exc:
             last_exc = exc
     if last_exc:
@@ -275,10 +297,10 @@ def fetch_subtitles(  # NOSONAR
     that didn't get enough results.
     """
     final_out: List[Dict[str, object]] = []
-    langs = [l.strip().lower() for l in (languages or []) if l and l.strip()]
+    langs = [normalize_lang(l) for l in (languages or []) if l and str(l).strip()]
     # de-dupe (preserve order)
     seen_langs = set()
-    langs = [l for l in langs if not (l in seen_langs or seen_langs.add(l))]
+    langs = [l for l in langs if l and l != "und" and not (l in seen_langs or seen_langs.add(l))]
     if not langs:
         return []
 
@@ -336,10 +358,10 @@ def _fetch_from_opensubtitles(
 ) -> List[Dict[str, object]]:
     """Internal helper for OpenSubtitles logic."""
     headers = {"Api-Key": key, "User-Agent": "cinema-cli v2.0", "Accept": "application/json"}
-    langs = [l.strip().lower() for l in (languages or []) if l and l.strip()]
+    langs = [normalize_lang(l) for l in (languages or []) if l and str(l).strip()]
     # de-dupe (preserve order)
     seen = set()
-    langs = [l for l in langs if not (l in seen or seen.add(l))]
+    langs = [l for l in langs if l and l != "und" and not (l in seen or seen.add(l))]
     if not langs:
         return []
 
@@ -355,15 +377,16 @@ def _fetch_from_opensubtitles(
         base_params["episode_number"] = episode
 
     out: List[Dict[str, object]] = []
-    for lang in langs:
-        picked = 0
-        for query in queries:
-            if picked >= max_per_language:
-                break
-
-            params = dict(base_params)
-            params["query"] = query
-            params["languages"] = lang
+    # OpenSubtitles allows comma-separated languages in a single request.
+    # We search all at once for each query variant.
+    langs_param = ",".join(langs)
+    
+    for query in queries:
+        params = dict(base_params)
+        params["query"] = query
+        params["languages"] = langs_param
+        
+        try:
             r = _request_with_retry(
                 "GET",
                 "https://api.opensubtitles.com/api/v1/subtitles",
@@ -375,15 +398,23 @@ def _fetch_from_opensubtitles(
             if not r or r.status_code != 200:
                 continue
 
-            items = r.json().get("data") or []
-            if not items:
+            data = r.json().get("data") or []
+            if not data:
                 continue
 
-            for it in items:
-                if picked >= max_per_language:
-                    break
-
+            # Group results by language to respect max_per_language
+            for it in data:
                 attrs = it.get("attributes") or {}
+                # The API returns 'language' as a 2-letter code in attributes
+                sub_lang = normalize_lang(attrs.get("language"))
+                
+                # Check if we still need more for this language
+                current_count = sum(1 for x in out if x["lang"] == sub_lang)
+                if current_count >= max_per_language:
+                    continue
+                if sub_lang not in langs:
+                    continue
+
                 files = attrs.get("files") or []
                 file_id = None
                 if files:
@@ -418,11 +449,15 @@ def _fetch_from_opensubtitles(
                 if not content:
                     continue
 
-                out.append({"lang": lang, "content": content, "ext": ext or "srt"})
-                picked += 1
+                out.append({"lang": sub_lang, "content": content, "ext": ext or "srt"})
+        except Exception as e:
+            from src.utils import app_logger
+            app_logger.debug(f"OpenSubtitles query error: {e}")
+            continue
 
-            if picked >= max_per_language:
-                break
+        # If we have at least one result for every requested language, we can stop querying variants
+        if all(sum(1 for x in out if x["lang"] == l) >= max_per_language for l in langs):
+            break
 
     return out
 

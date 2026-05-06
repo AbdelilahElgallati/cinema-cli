@@ -49,17 +49,31 @@ export async function getVidZee(media) {
 
       let data = await response.json();
 
-      if (data.url !== undefined && data.url.length > 0) {
-        const files = data.url.map((file) => ({
-          lang: file.lang || 'en',
-          file: file.link,
-          type: file.type || 'hls',
-          headers: {
-            Referer: DOMAIN,
-          },
-        }));
-        allFiles = allFiles.concat(files);
-      } else {
+      if (data.url) {
+        let files = [];
+        if (Array.isArray(data.url)) {
+          files = data.url.map((file) => ({
+            lang: file.lang || 'en',
+            file: file.link || file.url || file,
+            type: file.type || 'hls',
+            headers: {
+              Referer: DOMAIN,
+            },
+          }));
+        } else if (typeof data.url === 'string') {
+          files = [{
+            lang: 'en',
+            file: data.url,
+            type: 'hls',
+            headers: {
+              Referer: DOMAIN,
+            },
+          }];
+        }
+        
+        if (files.length > 0) {
+          allFiles = allFiles.concat(files);
+        }
       }
     } catch (err) {
       continue;

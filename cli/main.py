@@ -1,13 +1,27 @@
+import argparse
 import atexit
 import json
+import logging
+import math
 import os
+import select
+import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
+from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _asc2
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+from datetime import datetime
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    msvcrt = None
 
 
 USER_AGENT = "cinema-cli/1.0"
@@ -19,6 +33,77 @@ ACTION_PLAY = "▶ Play"
 ACTION_PLAY_LOCAL = "✨ Play Local (High Quality)"
 CLI_BRAND_TITLE = "🎬  CINEMA CLI"
 CLI_SEPARATOR = "  │  "
+DEBUG_MODE = False
+
+
+def _emit_unified_log(prefix: str, message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    text = str(message or "").rstrip()
+    if not text:
+        return
+    print(f"[{timestamp}] [{prefix}] {text}", flush=True)
+
+
+def _start_prefixed_stream_reader(stream, prefix: str):
+    if stream is None:
+        return
+
+    def _reader():
+        try:
+            for raw in iter(stream.readline, ""):
+                line = str(raw).rstrip("\r\n")
+                if line:
+                    _emit_unified_log(prefix, line)
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
+
+def _attach_backend_debug_streams(proc):
+    if not DEBUG_MODE or proc is None:
+        return
+    _start_prefixed_stream_reader(proc.stdout, "SCRAPER")
+    _start_prefixed_stream_reader(proc.stderr, "SCRAPER")
+
+
+def _enable_debug_mode():
+    global DEBUG_MODE
+    if DEBUG_MODE:
+        return
+    DEBUG_MODE = True
+    os.environ["CINEMA_DEBUG"] = "1"
+
+    class _UnifiedUIHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+            except Exception:
+                msg = record.getMessage()
+            _emit_unified_log("UI", msg)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.DEBUG)
+    unified_handler = _UnifiedUIHandler()
+    unified_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    root_logger.addHandler(unified_handler)
+
+    original_log_event = app_logger.log_event
+
+    def _debug_log_event(category: str, message: str, level: str = "INFO", correlation_id: str = ""):
+        original_log_event(category, message, level=level, correlation_id=correlation_id)
+        corr = f" corr={correlation_id}" if correlation_id else ""
+        _emit_unified_log("UI", f"{level} [{category}]{corr} {message}")
+
+    app_logger.log_event = _debug_log_event
+    _emit_unified_log("UI", "Debug mode enabled")
 
 
 def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
@@ -46,10 +131,15 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
                     if 200 <= int(getattr(resp, "status", 0)) < 400:
                         return True
             except Exception as e:
-                from src.utils import app_logger
                 app_logger.debug(f"Suppressed error in _is_running: {e}", exc_info=True)
                 continue
         return False
+
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            return int(sock.getsockname()[1])
 
     try:
         host = backend_url.split("://")[-1].split(":")[0]
@@ -63,19 +153,9 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
     if _is_running(backend_url):
         return None
 
-    def _backend_launch_env(url: str):
+    def _backend_launch_env(port: int):
         env = os.environ.copy()
-        try:
-            parsed = urlparse(url or "")
-            host = (parsed.hostname or "").lower()
-            if host not in ("localhost", "127.0.0.1", ""):
-                return env
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            if port:
-                env["PORT"] = str(port)
-        except Exception as e:
-            from src.utils import app_logger
-            app_logger.debug(f"Suppressed error in _backend_launch_env: {e}", exc_info=True)
+        env["PORT"] = str(port)
         return env
 
     backend_dir = os.path.abspath(
@@ -86,23 +166,36 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
     show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
 
     # Ensure log directory exists and open log file for append
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    logfile = open(log_path, "a+", encoding="utf-8")
+    logfile = None
+    if not DEBUG_MODE:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        logfile = open(log_path, "a+", encoding="utf-8")
+        stdout = logfile
+        stderr = logfile
+        popen_extra = {}
+    else:
+        stdout = subprocess.PIPE
+        stderr = subprocess.PIPE
+        popen_extra = {"text": True, "bufsize": 1}
+    parsed_backend_url = urlparse(backend_url or "http://localhost:3010")
+    launch_host = parsed_backend_url.hostname or "localhost"
+    launch_scheme = parsed_backend_url.scheme or "http"
+    launch_port = _find_free_port()
+    launch_url = f"{launch_scheme}://{launch_host}:{launch_port}"
+    launch_env = _backend_launch_env(launch_port)
 
-    stdout = logfile
-    stderr = logfile
-    launch_env = _backend_launch_env(backend_url)
-
+    npm_command = ["npm.cmd", "start"] if os.name == "nt" else ["npm", "start"]
     proc = None
     try:
         proc = subprocess.Popen(
-            "npm start",
+            npm_command,
             cwd=backend_dir,
-            shell=True,
             stdout=stdout,
             stderr=stderr,
             env=launch_env,
+            **popen_extra,
         )
+        _attach_backend_debug_streams(proc)
     except Exception:
         try:
             proc = subprocess.Popen(
@@ -111,17 +204,18 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
                 stdout=stdout,
                 stderr=stderr,
                 env=launch_env,
+                **popen_extra,
             )
+            _attach_backend_debug_streams(proc)
         except Exception:
-            logfile.close()
+            if logfile:
+                logfile.close()
             return None
 
     # Optionally tail live logs to console while waiting
     stop_tailer = None
     tail_thread = None
-    if show_logs:
-        import threading
-
+    if show_logs and not DEBUG_MODE:
         stop_tailer = threading.Event()
 
         def _tail_file(path, stop_event):
@@ -135,12 +229,10 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
                             try:
                                 console.print(line.rstrip())
                             except Exception as e:
-                                from src.utils import app_logger
                                 app_logger.debug(f"Suppressed error in _tail_file print: {e}", exc_info=True)
                         else:
                             time.sleep(0.2)
             except Exception as e:
-                from src.utils import app_logger
                 app_logger.debug(f"Suppressed error in _tail_file: {e}", exc_info=True)
                 return
 
@@ -150,17 +242,17 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
         tail_thread.start()
 
     # Wait until healthy or timeout while showing a friendly status
-    from src.config import console
-
     with console.status("Starting backend, please wait...", spinner="dots"):
         waited = 0.0
         interval = 0.5
         while waited < 60:
-            if _is_running(backend_url):
+            if _is_running(launch_url):
+                os.environ["BACKEND_URL"] = launch_url
                 if stop_tailer:
                     stop_tailer.set()
-                logfile.flush()
-                logfile.close()
+                if logfile:
+                    logfile.flush()
+                    logfile.close()
                 return proc
             time.sleep(interval)
             waited += interval
@@ -168,8 +260,9 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
     # Timeout reached; stop tailer if running and return proc (logs available in backend.log)
     if stop_tailer:
         stop_tailer.set()
-    logfile.flush()
-    logfile.close()
+    if logfile:
+        logfile.flush()
+        logfile.close()
     return proc
 
 
@@ -182,8 +275,8 @@ from prompt_toolkit.styles import Style
 
 from rich import box
 from rich.align import Align
-from rich.columns import Columns
 from rich.console import Group
+from rich.columns import Columns
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
@@ -209,7 +302,16 @@ from src.config import (
     WARNING,
     WATCH_LATER_FILE,
     console,
+    MAX_CONCURRENT_SOURCE_FETCHES,
+    THEME_NAMES,
+    THEMES,
+    _active_theme_name as _atn,
+    apply_theme as _apply_theme,
+    PROVIDER_SCORES_FILE,
 )
+from src.controllers.app_controller import AppController
+from src.state.app_state import AppState
+import src.config as _cfg_mod
 from src.ui.ui import (
     clear,
     format_item,
@@ -227,11 +329,13 @@ from src.utils.source_strategy import (
     filter_sources_for_quality,
     sort_manifest_qualities,
 )
-from src.utils.app_logger import log_event
 from src.utils.storage import load_json_data, save_json_data
 from src.utils.system_tools import is_tool_available
 from src.utils.utils import generate_filename, normalize_lang
 from src.utils.validator import select_working_source, select_multiple_working_sources, verify_source
+from src.utils.library import scan_library, clear_library_cache, format_size, get_media_details
+from src.utils.first_run import _load_env_key, _write_env, is_first_run, run_wizard
+from src.utils import app_logger
 
 
 def _arg_value(argv, flag, default=None):
@@ -251,13 +355,20 @@ def _subtitle_trace(subtitles, preferred_langs, include_all):  # NOSONAR
         url = s.get("url")
         if not isinstance(url, str) or not url:
             continue
-        lang = str(s.get("lang") or s.get("language") or "und").lower()
+        # Use normalized language code
+        raw_lang = str(s.get("lang") or s.get("language") or "und")
+        lang = normalize_lang(raw_lang)
         items.append({"lang": lang, "url": url})
 
     selected = []
     seen_lang = set()
     seen_url = set()
-    wants = [str(x).lower() for x in (preferred_langs or []) if str(x).strip()]
+    # Normalize the "wants" list
+    wants = []
+    for x in (preferred_langs or []):
+        code = normalize_lang(str(x))
+        if code != "und" and code not in wants:
+            wants.append(code)
 
     for lang in (wants if include_all else wants[:1]):
         for it in items:
@@ -340,7 +451,7 @@ def run_debug_source_command(argv):  # NOSONAR
             str(src.get("source_id", "n/a")),
         )
     console.print(tbl)
-    log_event("debug", f"debug-source done tmdb={tmdb_id} type={media_type}", correlation_id=corr or "")
+    app_logger.log_event("debug", f"debug-source done tmdb={tmdb_id} type={media_type}", correlation_id=corr or "")
     return 0
 
 
@@ -403,7 +514,7 @@ def run_debug_subtitle_command(argv):  # NOSONAR
     for i, sub in enumerate(selected[:8], start=1):
         tbl.add_row(str(i), str(sub.get("lang", "und")), str(sub.get("url", ""))[:90])
     console.print(tbl)
-    log_event("debug", f"debug-subtitle done tmdb={tmdb_id} type={media_type}", correlation_id=corr or "")
+    app_logger.log_event("debug", f"debug-subtitle done tmdb={tmdb_id} type={media_type}", correlation_id=corr or "")
     return 0
 
 
@@ -643,16 +754,18 @@ def build_subtitle_menu_options(  # NOSONAR
     fallback_langs = normalize_codes(fallback_langs)
     available_codes = normalize_codes(available_codes)
     configured_codes = normalize_codes(pref_langs + fallback_langs)
-    all_codes = available_codes or configured_codes
+    # Union of both sets to ensure we don't miss configured languages if provider returns some
+    all_codes = sorted(list(set(available_codes) | set(configured_codes)))
 
+    pref_count = len(pref_langs)
     pref_label = ", ".join(label(lang) for lang in pref_langs[:3])
-    if len(pref_langs) > 3:
-        pref_label += f" +{len(pref_langs)-3}"
+    if pref_count > 3:
+        pref_label += f" +{pref_count-3}"
     if not pref_label:
         pref_label = label(preferred_sub_lang)
 
     options = [
-        {"name": f"🌐 All Preferred ({pref_label})", "value": "preferred"},
+        {"name": f"🌐 All Preferred ({pref_count} langs: {pref_label})", "value": "preferred"},
         {"name": f"📝 Primary only ({label(preferred_sub_lang)})", "value": "primary"},
     ]
 
@@ -677,9 +790,8 @@ def _auto_update_ytdlp():
             if result.returncode == 0:
                 out = (result.stdout or "").strip()
                 if out and "up to date" not in out.lower():
-                    log_event("app", f"yt-dlp updated: {out}")
+                    app_logger.log_event("app", f"yt-dlp updated: {out}")
         except Exception as e:
-            from src.utils import app_logger
             app_logger.debug(f"Suppressed error in _auto_update_ytdlp: {e}", exc_info=True)
 
     threading.Thread(target=_update, daemon=True).start()
@@ -703,12 +815,9 @@ def startup_health_check():
     # ── Backend / TMDB reachability (quick, 3 s timeout) ─────────────────────
     _tmdb_ok = False
     try:
-        from urllib.request import urlopen, Request as _Req
-        from urllib.error import URLError
-        from src.config import TMDB_API_KEY
         _api_key = TMDB_API_KEY or ""
         if _api_key:
-            _r = _Req(
+            _r = Request(
                 f"https://api.themoviedb.org/3/configuration?api_key={_api_key}",
                 headers={"User-Agent": "cinema-cli/hc"},
             )
@@ -717,6 +826,21 @@ def startup_health_check():
     except Exception:
         pass
     checks.append(("TMDB API", _tmdb_ok, not _tmdb_ok))
+
+    # ── Backend reachability (quick, 3 s timeout) ───────────────────────────
+    _backend_ok = False
+    try:
+        _backend_url = os.getenv("BACKEND_URL") or BACKEND_URL
+        if _backend_url:
+            _r = Request(
+                f"{_backend_url.rstrip('/')}/health",
+                headers={"User-Agent": "cinema-cli/hc"},
+            )
+            with urlopen(_r, timeout=3) as _resp:
+                _backend_ok = _resp.status == 200
+    except Exception:
+        pass
+    checks.append(("Backend", _backend_ok, not _backend_ok))
 
     # ── Format ────────────────────────────────────────────────────────────────
     parts = []
@@ -799,8 +923,7 @@ class CinemaCLI:
         """Quick connectivity probe — returns True if both TMDB and the backend respond."""
         # Check TMDB (always needed, even without a local backend)
         try:
-            from urllib.request import urlopen, Request as _Req
-            tmdb_req = _Req(
+            tmdb_req = Request(
                 "https://api.themoviedb.org/3/configuration?api_key=" +
                 (self.settings.get("tmdb_key") or TMDB_API_KEY),
                 headers={"User-Agent": USER_AGENT}
@@ -875,18 +998,15 @@ class CinemaCLI:
         if self._is_backend_running(backend_url):
             return
 
-        def _backend_launch_env(url: str):
+        def _find_free_port() -> int:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                sock.listen(1)
+                return int(sock.getsockname()[1])
+
+        def _backend_launch_env(port: int):
             env = os.environ.copy()
-            try:
-                parsed = urlparse(url or "")
-                host = (parsed.hostname or "").lower()
-                if host not in ("localhost", "127.0.0.1", ""):
-                    return env
-                port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                if port:
-                    env["PORT"] = str(port)
-            except Exception:
-                pass
+            env["PORT"] = str(port)
             return env
 
         backend_dir = os.path.abspath(
@@ -896,22 +1016,40 @@ class CinemaCLI:
         try:
             # Allow showing backend logs when requested via env var
             show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
-            stdout = None if show_logs else subprocess.DEVNULL
-            stderr = None if show_logs else subprocess.DEVNULL
-            launch_env = _backend_launch_env(backend_url)
+            if DEBUG_MODE:
+                stdout = subprocess.PIPE
+                stderr = subprocess.PIPE
+                popen_extra = {"text": True, "bufsize": 1}
+            else:
+                stdout = None if show_logs else subprocess.DEVNULL
+                stderr = None if show_logs else subprocess.DEVNULL
+                popen_extra = {}
+            parsed_backend_url = urlparse(backend_url or "http://localhost:3010")
+            launch_host = parsed_backend_url.hostname or "localhost"
+            launch_scheme = parsed_backend_url.scheme or "http"
+            launch_port = _find_free_port()
+            launch_url = f"{launch_scheme}://{launch_host}:{launch_port}"
+            launch_env = _backend_launch_env(launch_port)
+            npm_command = ["npm.cmd", "start"] if os.name == "nt" else ["npm", "start"]
 
-            # Use shell=True for cross-platform command resolution (npm on PATH)
             self._backend_proc = subprocess.Popen(
-                "npm start",
+                npm_command,
                 cwd=backend_dir,
-                shell=True,
                 stdout=stdout,
                 stderr=stderr,
                 env=launch_env,
+                **popen_extra,
             )
+            _attach_backend_debug_streams(self._backend_proc)
             # Wait briefly for server to come up
-            for _ in range(10):
-                if self._is_backend_running(backend_url):
+            for _ in range(30):
+                if self._is_backend_running(launch_url):
+                    self.settings["backend"] = launch_url
+                    os.environ["BACKEND_URL"] = launch_url
+                    try:
+                        save_json_data(SETTINGS_FILE, self.settings)
+                    except Exception:
+                        pass
                     return
                 time.sleep(0.5)
         except Exception:
@@ -922,9 +1060,17 @@ class CinemaCLI:
                     stdout=stdout,
                     stderr=stderr,
                     env=launch_env,
+                    **popen_extra,
                 )
+                _attach_backend_debug_streams(self._backend_proc)
                 for _ in range(10):
-                    if self._is_backend_running(backend_url):
+                    if self._is_backend_running(launch_url):
+                        self.settings["backend"] = launch_url
+                        os.environ["BACKEND_URL"] = launch_url
+                        try:
+                            save_json_data(SETTINGS_FILE, self.settings)
+                        except Exception:
+                            pass
                         return
                     time.sleep(0.5)
             except Exception:
@@ -988,18 +1134,15 @@ class CinemaCLI:
         console.print()
 
     def main_menu(self):
-        # Import the active theme's highlight colour once
+        # Use the active theme's highlight colour
         try:
-            from src.config import THEMES, _active_theme_name as _atn
             _hl_fg = THEMES[_atn].get("highlight_fg", "#FFFFFF")
         except Exception as e:
-            from src.utils import app_logger
             app_logger.debug(f"Suppressed error in main_menu theme color: {e}", exc_info=True)
             _hl_fg = "#FFFFFF"
 
         if not hasattr(self, "backend_online_last_check"):
             self.backend_online_last_check = 0
-            self.backend_online = False
 
         while True:
             current_time = time.time()
@@ -1644,7 +1787,6 @@ class CinemaCLI:
 
         current_theme = self.settings.get("theme", "cinema")
         
-        from src.utils.first_run import _load_env_key
         osub_key = _load_env_key("OPENSUBTITLES_API_KEY")
         if not osub_key:
             osub_display = "Not Set"
@@ -1660,7 +1802,7 @@ class CinemaCLI:
             f"[bold {TEXT}]11. Theme:[/bold {TEXT}] {current_theme.capitalize()}"
         )
         console.print(
-            "[dim]    (Applies on next launch — choose from cinema, blue, purple, green, gold, teal, rose, sunset, mint)[/dim]"
+            "[dim]    (Applies immediately — choose from cinema, blue, purple, green, gold, teal, rose, sunset, mint)[/dim]"
         )
 
         speed_limit = self.settings.get("download_speed_limit", 0)
@@ -1777,9 +1919,16 @@ class CinemaCLI:
             new_val = console.input(
                 f"[bold {ACCENT}]Enter preferred subtitle languages (comma-separated): [/bold {ACCENT}]"
             )
-            langs = [x.strip().lower() for x in (new_val or '').split(',') if x.strip()]
+            # Normalize and deduplicate
+            raw_langs = [x.strip() for x in (new_val or '').split(',') if x.strip()]
+            langs = []
             seen = set()
-            langs = [x for x in langs if not (x in seen or seen.add(x))]
+            for l in raw_langs:
+                code = normalize_lang(l)
+                if code != "und" and code not in seen:
+                    langs.append(code)
+                    seen.add(code)
+
             if langs:
                 self.settings['preferred_subtitle_langs'] = langs
                 self.settings['preferred_subtitle'] = langs[0]   # keep primary in sync
@@ -1791,9 +1940,16 @@ class CinemaCLI:
             new_val = console.input(
                 f"[bold {ACCENT}]Enter fallback subtitle languages (comma-separated): [/bold {ACCENT}]"
             )
-            langs = [x.strip().lower() for x in (new_val or '').split(',') if x.strip()]
+            # Normalize and deduplicate
+            raw_langs = [x.strip() for x in (new_val or '').split(',') if x.strip()]
+            langs = []
             seen = set()
-            langs = [x for x in langs if not (x in seen or seen.add(x))]
+            for l in raw_langs:
+                code = normalize_lang(l)
+                if code != "und" and code not in seen:
+                    langs.append(code)
+                    seen.add(code)
+
             if langs:
                 self.settings['fallback_subtitle_langs'] = langs
                 console.print(f"[green]Fallback languages set to: {_fmt_langs(langs)}[/green]")
@@ -1801,12 +1957,10 @@ class CinemaCLI:
             new_val = console.input(
                 f"[bold {ACCENT}]Enter new OpenSubtitles API Key (or empty to clear): [/bold {ACCENT}]"
             ).strip()
-            from src.utils.first_run import _write_env
             _write_env({"OPENSUBTITLES_API_KEY": new_val})
             os.environ["OPENSUBTITLES_API_KEY"] = new_val
             console.print("[green]OpenSubtitles API Key updated![/green]")
         elif choice == "11":
-            from src.config import THEME_NAMES
             theme_opts = [
                 {"name": f"🎨  {t.capitalize()}", "value": t}
                 for t in THEME_NAMES
@@ -1821,10 +1975,8 @@ class CinemaCLI:
                 chosen_theme = sel["value"]["value"]
                 self.settings["theme"] = chosen_theme
                 # Apply the new theme live — no restart needed
-                from src.config import apply_theme as _apply_theme
                 _apply_theme(chosen_theme)
                 # Refresh this module's own colour globals immediately
-                import src.config as _cfg_mod
                 for _cname in ("PRIMARY", "SECONDARY", "ACCENT", "SUCCESS", "WARNING", "TEXT"):
                     globals()[_cname] = getattr(_cfg_mod, _cname)
                 console.print(
@@ -1861,7 +2013,6 @@ class CinemaCLI:
                 }
                 # Include provider health scores if they exist
                 try:
-                    from src.config import PROVIDER_SCORES_FILE
                     if os.path.exists(PROVIDER_SCORES_FILE):
                         with open(PROVIDER_SCORES_FILE, "r", encoding="utf-8") as _f:
                             export_bundle["provider_scores"] = json.load(_f)
@@ -1897,7 +2048,6 @@ class CinemaCLI:
                 save_json_data(SETTINGS_FILE, self.settings)
                 # Restore provider health scores if present
                 try:
-                    from src.config import PROVIDER_SCORES_FILE
                     if "provider_scores" in bundle and isinstance(bundle["provider_scores"], dict):
                         with open(PROVIDER_SCORES_FILE, "w", encoding="utf-8") as _f:
                             json.dump(bundle["provider_scores"], _f, indent=2)
@@ -1989,10 +2139,6 @@ class CinemaCLI:
 
     def autoplay_countdown(self, next_ep_name, timeout=10):
         """Displays a countdown panel. Returns True if finished, False if interrupted."""
-        from rich.live import Live
-        from rich.progress import Progress, BarColumn, TextColumn
-        import select
-        
         clear()
         progress = Progress(
             TextColumn(f"[bold yellow]{next_ep_name} starts in {{task.fields[secs]}} seconds...[/bold yellow]"),
@@ -2011,7 +2157,6 @@ class CinemaCLI:
                 
                 # Cross-platform key check
                 if sys.platform == "win32":
-                    import msvcrt
                     if msvcrt.kbhit():
                         msvcrt.getch()
                         return False
@@ -2208,19 +2353,34 @@ class CinemaCLI:
         # Batch preferences (applied to all episodes in this batch)
         selected_quality = "auto"
         preferred_sub_lang = self.settings.get("preferred_subtitle", "ar")
+        preferred_sub_lang = normalize_lang(preferred_sub_lang)
         pref_langs = self.settings.get("preferred_subtitle_langs", [preferred_sub_lang])
         fallback_langs = self.settings.get("fallback_subtitle_langs", ["ar", "en"])
         if not isinstance(pref_langs, list) or not pref_langs:
             pref_langs = [preferred_sub_lang]
-        if pref_langs[0] != preferred_sub_lang:
-            pref_langs = [preferred_sub_lang] + [l for l in pref_langs if l != preferred_sub_lang]
-        if not isinstance(fallback_langs, list):
-            fallback_langs = ["ar", "en"]
+        # Ensure all codes are normalized
+        pref_langs = [normalize_lang(l) for l in pref_langs if l and l != "none"]
+        fallback_langs = [normalize_lang(l) for l in fallback_langs if l and l != "none"]
+        
+        if pref_langs and pref_langs[0] != preferred_sub_lang:
+            if preferred_sub_lang != "none":
+                pref_langs = [preferred_sub_lang] + [l for l in pref_langs if l != preferred_sub_lang]
+        elif not pref_langs and preferred_sub_lang != "none":
+             pref_langs = [preferred_sub_lang]
         include_all_subs = len(pref_langs) > 1
 
         try:
-            first_ep = selected_episodes[0]
-            first_data = self.api.get_sources_enhanced(media["id"], "tv", s_num, first_ep["episode_number"], min_sources=2)
+            # Try fetching sources for the first few episodes to get quality/subtitle options
+            first_data = None
+            for ep_to_try in selected_episodes[:3]:
+                console.print(f"[dim]  Gathering available options from E{ep_to_try['episode_number']}...[/dim]")
+                first_data = self.api.get_sources_enhanced(media["id"], "tv", s_num, ep_to_try["episode_number"], min_sources=2, quiet=True)
+                if first_data and first_data.get("files"):
+                    break
+            
+            if not first_data:
+                first_data = {"files": [], "subtitles": []}
+
             first_files = first_data.get("files", []) if isinstance(first_data, dict) else []
             first_subs = first_data.get("subtitles", []) if isinstance(first_data, dict) else []
 
@@ -2249,35 +2409,36 @@ class CinemaCLI:
                 avail_codes,
                 fallback_langs,
             )
-            lang_sel = selection_menu(
+            lang_sel = multi_selection_menu(
                 lang_opts,
                 "Batch Download - Select Subtitle Languages",
-                show_details=False,
                 formatter=lambda x: x["name"],
             )
-            if lang_sel and lang_sel.get("action") == "select":
-                chosen = lang_sel["value"]["value"]
-                if chosen == "preferred":
-                    include_all_subs = True
-                elif chosen == "all":
-                    include_all_subs = True
-                    pref_langs = all_lang_codes or pref_langs
-                elif chosen == "primary":
-                    include_all_subs = False
-                    pref_langs = [preferred_sub_lang]
-                elif chosen == "none":
+            if lang_sel:
+                values = [x["value"] for x in lang_sel]
+                if "none" in values:
                     preferred_sub_lang = "none"
                     pref_langs = []
                     include_all_subs = False
-                else:
-                    preferred_sub_lang = chosen
-                    pref_langs = [chosen]
+                elif "preferred" in values:
+                    include_all_subs = True
+                    # pref_langs remains as loaded from settings
+                elif "all" in values:
+                    include_all_subs = True
+                    pref_langs = all_lang_codes or pref_langs
+                elif "primary" in values:
                     include_all_subs = False
+                    pref_langs = [preferred_sub_lang]
+                else:
+                    pref_langs = values
+                    preferred_sub_lang = pref_langs[0]
+                    include_all_subs = len(pref_langs) > 1
+            else:
+                include_all_subs = len(pref_langs) > 1
         except Exception as _pref_err:
             # Log preference selection error instead of silently swallowing it
             try:
-                from src.utils.app_logger import log_event
-                log_event("download", f"Batch preference selection error: {_pref_err}", level="WARNING")
+                app_logger.log_event("download", f"Batch preference selection error: {_pref_err}", level="WARNING")
             except Exception:
                 pass
             console.print("[yellow]Preference selection encountered an issue; using defaults.[/yellow]")
@@ -2289,27 +2450,31 @@ class CinemaCLI:
         ep_data_map: dict = {}   # episode_number -> {files, subtitles}
         ep_sources:  dict = {}   # episode_number -> selected_source
 
-        def _fetch_ep(ep):
-            ep_num = ep.get("episode_number")
-            try:
-                data = self.api.get_sources_enhanced(
-                    media["id"], "tv", s_num, ep_num, min_sources=2
-                )
-                files  = data.get("files", []) if isinstance(data, dict) else []
-                subs   = data.get("subtitles", []) if isinstance(data, dict) else []
-                mode = "auto"
-                # Quality filter
-                if selected_quality != "auto" and files:
-                    files, mode = filter_sources_for_quality(files, selected_quality)
-                    if mode == "unavailable_tagged":
-                        files = []
-                src = select_working_source(files) if files else None
-                return ep_num, files, subs, src, mode
-            except Exception:
-                return ep_num, [], [], None, "auto"
+        _fetch_semaphore = threading.Semaphore(MAX_CONCURRENT_SOURCE_FETCHES)
 
-        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
-        with _TPE(max_workers=min(4, len(selected_episodes))) as _pool:
+        def _fetch_ep(ep):
+            with _fetch_semaphore:
+                ep_num = ep.get("episode_number")
+                try:
+                    data = self.api.get_sources_enhanced(
+                        media["id"], "tv", s_num, ep_num, min_sources=2, quiet=True
+                    )
+                    files  = data.get("files", []) if isinstance(data, dict) else []
+                    subs   = data.get("subtitles", []) if isinstance(data, dict) else []
+                    mode = "auto"
+                    # Quality filter
+                    if selected_quality != "auto" and files:
+                        files, mode = filter_sources_for_quality(files, selected_quality)
+                    src = select_working_source(files) if files else None
+                    return ep_num, files, subs, src, mode
+                except Exception as e:
+                    try:
+                        app_logger.log_event("api", f"Parallel fetch error for E{ep_num}: {e}", level="ERROR")
+                    except:
+                        pass
+                    return ep_num, [], [], None, "auto"
+
+        with _TPE(max_workers=min(MAX_CONCURRENT_SOURCE_FETCHES * 2, len(selected_episodes))) as _pool:
             _futs = {_pool.submit(_fetch_ep, ep): ep for ep in selected_episodes}
             for _fut in _asc(_futs):
                 ep_num, files, subs, src, mode = _fut.result()
@@ -2428,9 +2593,17 @@ class CinemaCLI:
         include_all_subs = len(pref_langs) > 1
 
         try:
-            first_m  = selected_movies[0]
-            first_id = first_m.get("id")
-            first_data = self.api.get_sources_enhanced(first_id, "movie", min_sources=2)
+            # Try fetching sources for the first few movies to get quality/subtitle options
+            first_data = None
+            for m_to_try in selected_movies[:3]:
+                console.print(f"[dim]  Gathering available options from {m_to_try.get('title','')}...[/dim]")
+                first_data = self.api.get_sources_enhanced(m_to_try.get("id"), "movie", min_sources=2, quiet=True)
+                if first_data and first_data.get("files"):
+                    break
+            
+            if not first_data:
+                first_data = {"files": [], "subtitles": []}
+
             first_files = first_data.get("files", []) if isinstance(first_data, dict) else []
             first_subs  = first_data.get("subtitles", []) if isinstance(first_data, dict) else []
 
@@ -2455,28 +2628,30 @@ class CinemaCLI:
                 avail_codes,
                 fallback_langs,
             )
-            lang_sel = selection_menu(
+            lang_sel = multi_selection_menu(
                 lang_opts, "Batch Download — Select Subtitle Languages",
-                show_details=False, formatter=lambda x: x["name"],
+                formatter=lambda x: x["name"],
             )
-            if lang_sel and lang_sel.get("action") == "select":
-                chosen = lang_sel["value"]["value"]
-                if chosen == "preferred":
-                    include_all_subs = True
-                elif chosen == "all":
-                    include_all_subs = True
-                    pref_langs = all_lang_codes or pref_langs
-                elif chosen == "primary":
-                    include_all_subs = False
-                    pref_langs = [preferred_sub_lang]
-                elif chosen == "none":
+            if lang_sel:
+                values = [x["value"] for x in lang_sel]
+                if "none" in values:
                     preferred_sub_lang = "none"
                     pref_langs = []
                     include_all_subs = False
-                else:
-                    preferred_sub_lang = chosen
-                    pref_langs = [chosen]
+                elif "preferred" in values:
+                    include_all_subs = True
+                elif "all" in values:
+                    include_all_subs = True
+                    pref_langs = all_lang_codes or pref_langs
+                elif "primary" in values:
                     include_all_subs = False
+                    pref_langs = [preferred_sub_lang]
+                else:
+                    pref_langs = values
+                    preferred_sub_lang = pref_langs[0]
+                    include_all_subs = len(pref_langs) > 1
+            else:
+                include_all_subs = len(pref_langs) > 1
         except Exception:
             console.print("[yellow]Batch preference selection encountered an issue; using defaults.[/yellow]")
 
@@ -2487,24 +2662,24 @@ class CinemaCLI:
         movie_data_map: dict = {}    # tmdb_id -> {files, subtitles}
         movie_sources:  dict = {}    # tmdb_id -> selected_source
 
-        def _fetch_movie(m):
-            mid = m.get("id")
-            try:
-                data = self.api.get_sources_enhanced(mid, "movie", min_sources=2)
-                files = data.get("files", []) if isinstance(data, dict) else []
-                subs  = data.get("subtitles", []) if isinstance(data, dict) else []
-                mode = "auto"
-                if selected_quality != "auto" and files:
-                    files, mode = filter_sources_for_quality(files, selected_quality)
-                    if mode == "unavailable_tagged":
-                        files = []
-                src = select_working_source(files) if files else None
-                return mid, files, subs, src, mode
-            except Exception:
-                return mid, [], [], None, "auto"
+        _fetch_semaphore = threading.Semaphore(MAX_CONCURRENT_SOURCE_FETCHES)
 
-        from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _asc2
-        with _TPE2(max_workers=min(4, len(selected_movies))) as _pool:
+        def _fetch_movie(m):
+            with _fetch_semaphore:
+                mid = m.get("id")
+                try:
+                    data = self.api.get_sources_enhanced(mid, "movie", min_sources=2)
+                    files = data.get("files", []) if isinstance(data, dict) else []
+                    subs  = data.get("subtitles", []) if isinstance(data, dict) else []
+                    mode = "auto"
+                    if selected_quality != "auto" and files:
+                        files, mode = filter_sources_for_quality(files, selected_quality)
+                    src = select_working_source(files) if files else None
+                    return mid, files, subs, src, mode
+                except Exception:
+                    return mid, [], [], None, "auto"
+
+        with _TPE2(max_workers=min(MAX_CONCURRENT_SOURCE_FETCHES * 2, len(selected_movies))) as _pool:
             _futs = {_pool.submit(_fetch_movie, m): m for m in selected_movies}
             for _fut in _asc2(_futs):
                 mid, files, subs, src, mode = _fut.result()
@@ -2589,7 +2764,6 @@ class CinemaCLI:
             pos = info.get("position", 0)
             dur = info.get("duration", 0)
             if not info.get("finished") and pos > 10 and (dur == 0 or pos < dur * 0.95):
-                import math
                 mins = math.floor(pos / 60)
                 secs = int(pos % 60)
                 res = selection_menu(
@@ -2605,7 +2779,6 @@ class CinemaCLI:
         local_file = None
         lib_path = self.settings.get("library_dir")
         if lib_path and os.path.exists(lib_path):
-            from src.utils.library import scan_library
             lib_data = scan_library(lib_path, include_details=False)
             if meta and meta.get("type") == "movie":
                 for m in lib_data.get("movies", []):
@@ -2641,15 +2814,24 @@ class CinemaCLI:
         # ── SUBTITLE SELECTION ──
         preferred_sub_lang = self.settings.get("preferred_subtitle", "ar")
         # Ordered multi-language list from settings (primary first)
+        preferred_sub_lang = normalize_lang(preferred_sub_lang)
         pref_langs = self.settings.get("preferred_subtitle_langs", [preferred_sub_lang])
         fallback_langs = self.settings.get("fallback_subtitle_langs", ["ar", "en"])
         if not isinstance(pref_langs, list) or not pref_langs:
             pref_langs = [preferred_sub_lang]
         if not isinstance(fallback_langs, list):
             fallback_langs = ["ar", "en"]
+            
+        # Ensure all codes are normalized to 2-letter standard
+        pref_langs = [normalize_lang(l) for l in pref_langs if l and l != "none"]
+        fallback_langs = [normalize_lang(l) for l in fallback_langs if l and l != "none"]
+        
         # Keep primary in sync as first entry
-        if pref_langs[0] != preferred_sub_lang:
-            pref_langs = [preferred_sub_lang] + [l for l in pref_langs if l != preferred_sub_lang]
+        if pref_langs and pref_langs[0] != preferred_sub_lang:
+            if preferred_sub_lang != "none":
+                pref_langs = [preferred_sub_lang] + [l for l in pref_langs if l != preferred_sub_lang]
+        elif not pref_langs and preferred_sub_lang != "none":
+             pref_langs = [preferred_sub_lang]
         include_all_subs = len(pref_langs) > 1  # default: embed all preferred langs
 
         lang_codes = []
@@ -2669,31 +2851,41 @@ class CinemaCLI:
         if not lang_codes:
             sub_title += " (fallback search only)"
 
-        sub_sel = selection_menu(
+        sub_sel = multi_selection_menu(
             sub_options,
             sub_title,
-            show_details=False,
             formatter=lambda x: x["name"],
         )
-        if sub_sel and sub_sel.get("action") == "select":
-            choice = sub_sel["value"]["value"]
-            if choice == "preferred":
-                include_all_subs = True
-            elif choice == "all":
-                include_all_subs = True
-                pref_langs = all_lang_codes or pref_langs
-            elif choice == "primary":
-                include_all_subs = False
-                pref_langs = [preferred_sub_lang]
-            elif choice == "none":
+
+        if sub_sel:
+            # Check if any special action was selected
+            values = [x["value"] for x in sub_sel]
+            
+            if "none" in values:
                 subtitles = []
                 preferred_sub_lang = "none"
                 pref_langs = []
                 include_all_subs = False
             else:
-                preferred_sub_lang = choice
-                pref_langs = [choice]
-                include_all_subs = False
+                # Prioritize explicit language selections if any
+                actual_langs = [v for v in values if v not in ("all", "preferred", "primary")]
+                
+                if actual_langs:
+                    pref_langs = actual_langs
+                    preferred_sub_lang = pref_langs[0]
+                    include_all_subs = len(pref_langs) > 1
+                elif "all" in values:
+                    include_all_subs = True
+                    pref_langs = all_lang_codes or pref_langs
+                elif "preferred" in values:
+                    include_all_subs = True
+                    # pref_langs remains as loaded from settings
+                elif "primary" in values:
+                    include_all_subs = False
+                    pref_langs = [preferred_sub_lang]
+        else:
+            # Default to primary or settings if nothing selected
+            include_all_subs = len(pref_langs) > 1
 
         # ── Handle adaptive quality (speed test) ──
         if selected_quality == "adaptive":
@@ -2746,12 +2938,10 @@ class CinemaCLI:
         # ── Filter files by selected quality ──
         filtered_files, _quality_mode = filter_sources_for_quality(files, selected_quality)
         if selected_quality not in ("auto", "adaptive"):
-            if _quality_mode == "unavailable_tagged":
+            if _quality_mode == "fallback_tagged":
                 console.print(
-                    f"[yellow]Selected quality '{selected_quality}' is not available in provider-tagged sources.[/yellow]"
+                    f"[yellow]Selected quality '{selected_quality}' is unavailable exactly; using closest provider-tagged sources.[/yellow]"
                 )
-                console.print("[dim]Strict mode: no fallback to other tagged qualities.[/dim]")
-                filtered_files = []
             elif _quality_mode == "enforced_manifest":
                 # Provider did not tag qualities; keep all files and enforce
                 # quality via manifest selection in yt-dlp/mpv.
@@ -2781,7 +2971,6 @@ class CinemaCLI:
                 return False
 
             if act["value"] == ACTION_PLAY_LOCAL:
-                from src.utils.player import play_video
                 psl = self.settings.get("preferred_subtitle", "ar")
                 ppl = self.settings.get("preferred_player", "mpv")
                 play_video(local_file, title, preferred_sub_lang=psl, player=ppl)
@@ -2960,7 +3149,7 @@ class CinemaCLI:
                     )
                     if not pq_sel or pq_sel.get("action") in ("back", "quit"):
                         break
-                    pq_act = pq_sel.get("value", {}).get("value") if pq_sel.get("value") else None
+                    pq_act = (pq_sel.get("value") or {}).get("value") if pq_sel and pq_sel.get("action") == "select" else None
                     if pq_act == "done" or pq_act is None:
                         break
                     if pq_act == "replay":
@@ -3071,7 +3260,6 @@ class CinemaCLI:
 
 
     def handle_local_library(self):
-        from src.utils.library import scan_library
         
         lib_path = self.settings.get("library_dir")
         if not os.path.exists(lib_path):
@@ -3135,7 +3323,6 @@ class CinemaCLI:
             os.remove(file_path)
             self._prune_empty_dirs(file_path, self.settings.get("library_dir", ""))
             try:
-                from src.utils.library import clear_library_cache
                 clear_library_cache(self.settings.get("library_dir", ""))
             except Exception:
                 pass
@@ -3145,7 +3332,6 @@ class CinemaCLI:
             return False
 
     def handle_library_movies(self, movies):  # NOSONAR
-        from src.utils.library import format_size, get_media_details
         while True:
             sel = selection_menu(movies, "Local Movies", show_details=True, 
                                  formatter=lambda x: f"{x['title']} ({x.get('year', 'N/A')})")
@@ -3162,10 +3348,8 @@ class CinemaCLI:
                 
             while True:
                 clear()
-                from rich.text import Text as _T
-                from rich.columns import Columns
                 # Header
-                hdr = _T()
+                hdr = Text()
                 hdr.append(CLI_BRAND_TITLE, style=f"bold {PRIMARY}")
                 hdr.append(CLI_SEPARATOR, style=f"dim {PRIMARY}")
                 hdr.append(movie["title"], style=f"bold {ACCENT}")
@@ -3198,11 +3382,11 @@ class CinemaCLI:
                     {"name": "⬅  Back",     "value": "back"},
                 ]
                 act = selection_menu(action_opts, movie["title"], show_details=False, formatter=lambda x: x["name"])
-                if not act or act["action"] in ("back", "quit") or act.get("value", {}).get("value") == "back":
+                if not act or act["action"] in ("back", "quit") or (act.get("value") or {}).get("value") == "back":
                     break
-                if act.get("value", {}).get("value") == "play":
+                if (act.get("value") or {}).get("value") == "play":
                     play_video(movie["path"], movie["title"], player=self.settings.get("preferred_player", "mpv"))
-                elif act.get("value", {}).get("value") == "delete":
+                elif (act.get("value") or {}).get("value") == "delete":
                     if self._confirm_delete(f"Delete movie '{movie['title']}'"):
                         deleted = self._delete_media_file(movie.get("path"))
                         if deleted:
@@ -3213,7 +3397,6 @@ class CinemaCLI:
                         time.sleep(1)
 
     def handle_library_tv(self, tv_data):  # NOSONAR
-        from src.utils.library import format_size, get_media_details
         while True:
             shows = [{"title": s, "seasons": d} for s, d in tv_data.items()]
             sel = selection_menu(shows, "Local TV Shows", show_details=False, formatter=lambda x: x["title"])
@@ -3296,10 +3479,9 @@ class CinemaCLI:
                     # Let's show details AND option to play
                     while True:
                         clear()
-                        from rich.text import Text as _T2
                         ep_label = f"{show['title']} S{season['num']}E{ep['episode']}"
                         # Header
-                        hdr2 = _T2()
+                        hdr2 = Text()
                         hdr2.append(CLI_BRAND_TITLE, style=f"bold {PRIMARY}")
                         hdr2.append(CLI_SEPARATOR, style=f"dim {PRIMARY}")
                         hdr2.append(ep_label, style=f"bold {ACCENT}")
@@ -3332,9 +3514,9 @@ class CinemaCLI:
                             {"name": "⬅  Back",   "value": "back"},
                         ]
                         ep_act = selection_menu(ep_action_opts, ep_label, show_details=False, formatter=lambda x: x["name"])
-                        if not ep_act or ep_act["action"] in ("back", "quit") or ep_act.get("value", {}).get("value") == "back":
+                        if not ep_act or ep_act["action"] in ("back", "quit") or (ep_act.get("value") or {}).get("value") == "back":
                             break
-                        if ep_act.get("value", {}).get("value") == "play":
+                        if (ep_act.get("value") or {}).get("value") == "play":
                             auto_play = True
                             while auto_play:
                                 auto_play = False
@@ -3349,7 +3531,7 @@ class CinemaCLI:
                                 post_opts.append({"name": "⬅  Go Back to Details", "value": "back"})
                                 
                                 post_act = selection_menu(post_opts, "Playback Finished", show_details=False, formatter=lambda x: x["name"])
-                                post_val = post_act.get("value", {}).get("value") if post_act and "value" in post_act else "back"
+                                post_val = (post_act.get("value") or {}).get("value") if post_act and post_act.get("action") == "select" else "back"
                                 
                                 if post_val == "replay":
                                     auto_play = True
@@ -3361,7 +3543,7 @@ class CinemaCLI:
                                     ep = season["eps"][cur_idx - 1]
                                     ep_label = f"{show['title']} S{season['num']}E{ep['episode']}"
                                     auto_play = True
-                        elif ep_act.get("value", {}).get("value") == "delete":
+                        elif (ep_act.get("value") or {}).get("value") == "delete":
                             if self._confirm_delete(f"Delete episode S{season['num']}E{ep['episode']} from '{show['title']}'"):
                                 deleted = self._delete_media_file(ep.get("path"))
                                 if deleted:
@@ -3372,9 +3554,6 @@ class CinemaCLI:
                                 time.sleep(1)
 
     def handle_download_manager(self):  # NOSONAR
-        import select
-        from rich.rule import Rule
-        from rich.text import Text
 
         selected_indices = set()
 
@@ -3584,7 +3763,6 @@ class CinemaCLI:
 
                 key = None
                 if sys.platform == "win32":
-                    import msvcrt
                     if msvcrt.kbhit():
                         raw_key = msvcrt.getch()
                         if raw_key in [b'\x00', b'\xe0']:
@@ -3635,85 +3813,21 @@ class CinemaCLI:
 
 
 if __name__ == "__main__":
-    # ── First-run setup wizard ────────────────────────────────────────────────
-    # Must run before --version/--help parsing so new users aren't confused
-    # by an empty terminal when they forget dependencies.
-    from src.utils.first_run import is_first_run, run_wizard
-    _is_setup_flag = "--setup" in sys.argv
-    if _is_setup_flag or is_first_run():
-        run_wizard(force=_is_setup_flag)
-        if _is_setup_flag:
-            sys.exit(0)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--debug", action="store_true")
+    parsed_args, passthrough_argv = parser.parse_known_args(sys.argv[1:])
+    if parsed_args.debug:
+        _enable_debug_mode()
 
-    # ── Handle --version / --help before spinning up the TUI ─────────────────
-    _argv = sys.argv[1:]
-    if _argv and _argv[0] in ("--version", "-V", "-v"):
-        from src.config import APP_VERSION
-        print(f"Cinema CLI v{APP_VERSION}")
-        sys.exit(0)
-    if _argv and _argv[0] in ("--help", "-h"):
-        print(
-            "Cinema CLI — a terminal-based movie & TV streaming client\n"
-            "\n"
-            "Usage:\n"
-            "  python main.py [OPTIONS]\n"
-            "\n"
-            "Options:\n"
-            "  --version, -V     Print version and exit\n"
-            "  --help,    -h     Show this help message and exit\n"
-            "  --setup           Re-run the first-run setup wizard\n"
-            "  --debug-source    Print source pipeline + quality trace for one title/episode\n"
-            "                    Required: --tmdb-id <id> --type <movie|tv>\n"
-            "                    TV only:  --season <n> --episode <n>\n"
-            "                    Optional: --quality <auto|1080p|720p|...>\n"
-            "  --debug-subtitle  Print subtitle decision trace for one title/episode\n"
-            "                    Required: --tmdb-id <id> --type <movie|tv>\n"
-            "                    TV only:  --season <n> --episode <n>\n"
-            "                    Optional: --include-all\n"
-            "  --smoke           Tiny automated smoke test for movie/tv source selection\n"
-            "                    Optional: --movie-id <id> --tv-id <id> --season <n> --episode <n>\n"
-            "                              --skip-validation --timeout <sec>\n"
-            "\n"
-            "Keyboard shortcuts (inside the TUI):\n"
-            "  ↑ ↓ / j k        Navigate lists\n"
-            "  Enter             Select / Confirm\n"
-            "  F                 Toggle favourite\n"
-            "  W                 Toggle Watch Later\n"
-            "  D                 Batch download (search / browse results)\n"
-            "  B / Esc           Go back\n"
-            "  Q                 Quit\n"
-        )
-        sys.exit(0)
-
-    # Commands that hit backend APIs should also trigger local backend autostart.
-    _needs_backend = any(
-        flag in _argv for flag in ("--debug-source", "--debug-subtitle", "--smoke")
+    app_state = AppState(argv=passthrough_argv)
+    controller = AppController(
+        app_state,
+        start_local_backend=start_local_backend,
+        run_debug_source_command=run_debug_source_command,
+        run_debug_subtitle_command=run_debug_subtitle_command,
+        run_smoke_command=run_smoke_command,
+        startup_health_check=startup_health_check,
+        show_splash=show_splash,
+        cli_factory=CinemaCLI,
     )
-    if _needs_backend:
-        _boot_settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
-        _backend_url = _boot_settings.get("backend") or os.getenv("BACKEND_URL") or BACKEND_URL
-        start_local_backend(_backend_url, timeout=60)
-
-    if "--debug-source" in _argv:
-        sys.exit(run_debug_source_command(_argv))
-
-    if "--debug-subtitle" in _argv:
-        sys.exit(run_debug_subtitle_command(_argv))
-
-    if "--smoke" in _argv:
-        sys.exit(run_smoke_command(_argv))
-
-    # Ensure backend is started and healthy before instantiating the CLI.
-    # Prefer user settings backend URL, then env/default config.
-    _boot_settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
-    _backend_url = _boot_settings.get("backend") or os.getenv("BACKEND_URL") or BACKEND_URL
-    start_local_backend(_backend_url, timeout=60)
-
-    cli = CinemaCLI()
-    try:
-        show_splash()
-        startup_health_check()
-        cli.main_menu()
-    except KeyboardInterrupt:
-        print("\nGoodbye!")
-        sys.exit(0)
+    sys.exit(controller.run())

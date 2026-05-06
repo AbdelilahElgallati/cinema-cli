@@ -1,15 +1,17 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fetch from 'node-fetch';
 
 const STATS_PATH = path.resolve(process.cwd(), 'src', 'cache', 'provider_stats.json');
 const DEFAULT_STATS = { providers: {} };
 
-function ensureDir(filePath) {
+async function ensureDir(filePath) {
   const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) {
+    await fs.promises.mkdir(dir, { recursive: true });
+  }
 }
 
 function loadStats() {
@@ -25,23 +27,40 @@ function loadStats() {
   }
 }
 
-function saveStats(stats) {
+async function saveStats(stats) {
   try {
-    ensureDir(STATS_PATH);
-    fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2));
-  } catch {
-    // Never fail request on stats write issues.
+    await ensureDir(STATS_PATH);
+    await fs.promises.writeFile(STATS_PATH, JSON.stringify(stats, null, 2), 'utf-8');
+  } catch (err) {
+    console.error(`[Pipeline] Failed to persist provider stats: ${err?.message || err}`);
   }
 }
 
 function normalizeQuality(raw) {
   const q = String(raw || '').toLowerCase().trim();
+  const compact = q.replace(/[\s_-]/g, '');
   if (!q) return 'unknown';
-  if (q.includes('4k') || q.includes('2160')) return '2160p';
-  if (q.includes('1080')) return '1080p';
-  if (q.includes('720')) return '720p';
-  if (q.includes('480')) return '480p';
-  if (q.includes('360')) return '360p';
+  if (compact.includes('4k') || compact.includes('2160')) return '2160p';
+  if (compact.includes('1080')) return '1080p';
+  if (compact.includes('720')) return '720p';
+  if (compact.includes('480')) return '480p';
+  if (compact.includes('360')) return '360p';
+  
+  // VidRock specific mappings
+  if (['sol', 'zenith'].includes(compact)) return '2160p';
+  if (['astra', 'atlas', 'orion'].includes(compact)) return '1080p';
+  if (['nova', 'luna'].includes(compact)) return '720p';
+  if (['vega', 'draco'].includes(compact)) return '480p';
+  if (['nyx'].includes(compact)) return '360p';
+
+  if (['auto', 'adaptive', 'best'].includes(compact)) return 'unknown';
+  if (compact.includes('fhd') || compact.includes('fullhd')) return '1080p';
+  if (compact === 'hd' || compact.includes('high')) return '1080p';
+  if (compact.includes('sd')) return '480p';
+  if (compact.includes('low')) return '360p';
+  if (compact.includes('medium')) return '720p';
+
+  if (compact.includes('uhd')) return '2160p';
   return q;
 }
 
@@ -108,9 +127,12 @@ function qualityFromStreamInf(attrsLine = '') {
 }
 
 async function expandHlsVariants(source) {
-  if (!source || source.type !== 'hls' || source.quality !== 'unknown') {
+  if (!source || source.type !== 'hls') {
     return [source];
   }
+
+  // If already expanded, don't re-expand
+  if (source.parent_source_id) return [source];
 
   try {
     const mergedHeaders = {
@@ -212,42 +234,71 @@ async function httpProbe(url, headers) {
 
 function ffprobeCheck(url, headers) {
   if (!url || !url.startsWith('http')) {
-    return { status: 'invalid_url', hasVideo: null };
+    return Promise.resolve({ status: 'invalid_url', hasVideo: null });
   }
-  try {
-    const ffprobe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
-    const headerLines = Object.entries(headers || {})
-      .filter(([, v]) => v !== undefined && v !== null)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join('\r\n');
+  return new Promise((resolve) => {
+    try {
+      const ffprobe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
+      // Sanitize headers to prevent CRLF injection
+      const sanitizeHeader = (s) => String(s).replace(/[\r\n\0]/g, '');
+      const headerLines = Object.entries(headers || {})
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => `${sanitizeHeader(k)}: ${sanitizeHeader(v)}`)
+        .join('\r\n');
+      
+      const headersWithTrailingCRLF = headerLines ? headerLines + '\r\n' : '';
 
-    const args = ['-v', 'error', '-show_entries', 'stream=codec_type', '-select_streams', 'v:0', '-of', 'default=noprint_wrappers=1:nokey=1'];
-    if (headerLines) args.push('-headers', `${headerLines}\r\n`);
-    args.push(url);
+      const args = ['-v', 'error', '-show_entries', 'stream=codec_type', '-select_streams', 'v:0', '-of', 'default=noprint_wrappers=1:nokey=1'];
+      if (headersWithTrailingCRLF) args.push('-headers', headersWithTrailingCRLF);
+      args.push(url);
 
-    const result = spawnSync(ffprobe, args, {
-      timeout: 5000,
-      encoding: 'utf-8',
-      windowsHide: true,
-    });
+      const child = spawn(ffprobe, args, {
+        windowsHide: true,
+      });
 
-    if (result.error) {
-      return { status: 'unavailable', hasVideo: null };
+      let stdout = '';
+      let stderr = '';
+      const timeout = setTimeout(() => {
+        child.kill();
+        resolve({ status: 'timeout', hasVideo: null });
+      }, 5000);
+
+      child.stdout.on('data', (data) => {
+        stdout += data;
+      });
+
+      child.stderr.on('data', (data) => {
+        stderr += data;
+      });
+
+      child.on('error', () => {
+        clearTimeout(timeout);
+        resolve({ status: 'unavailable', hasVideo: null });
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeout);
+        if (code !== 0) {
+          resolve({ 
+            status: 'probe_inconclusive', 
+            hasVideo: null, 
+            error: stderr.trim() || `Exit code ${code}` 
+          });
+          return;
+        }
+
+        const out = String(stdout || '').toLowerCase();
+        if (out.includes('video')) return resolve({ status: 'ok', hasVideo: true, transport: 'ffprobe' });
+        resolve({ status: 'no_video', hasVideo: false, transport: 'ffprobe' });
+      });
+    } catch {
+      resolve({ status: 'unavailable', hasVideo: null });
     }
-    if (result.status !== 0) {
-      return { status: 'probe_inconclusive', hasVideo: null };
-    }
-
-    const out = String(result.stdout || '').toLowerCase();
-    if (out.includes('video')) return { status: 'ok', hasVideo: true, transport: 'ffprobe' };
-    return { status: 'no_video', hasVideo: false, transport: 'ffprobe' };
-  } catch {
-    return { status: 'unavailable', hasVideo: null };
-  }
+  });
 }
 
 async function probeSource(src) {
-  const ff = ffprobeCheck(src.file, src.headers);
+  const ff = await ffprobeCheck(src.file, src.headers);
   if (ff.status === 'ok' || ff.status === 'no_video') return ff;
   const http = await httpProbe(src.file, src.headers);
   return http;
@@ -293,6 +344,11 @@ async function batch(items, fn, limit = 5) {
   return results;
 }
 
+const shouldDebug = () =>
+  process.argv.includes('--debug') ||
+  process.env.DEBUG === 'true' ||
+  process.env.LOG_LEVEL === 'debug';
+
 export async function runSourcePipeline(rawProviderResults, options = {}) {
   const startedAt = Date.now();
   const stageDurations = {};
@@ -313,17 +369,36 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     const subsRaw = Array.isArray(data.subtitles) ? data.subtitles : [];
 
     for (const f of filesRaw) {
-      if (!f || typeof f !== 'object' || typeof f.file !== 'string') continue;
-      const file = f.file;
+      let file = null;
+      let type = null;
+      let quality = null;
+      let headers = {};
+
+      if (typeof f === 'string') {
+        file = f;
+      } else if (f && typeof f === 'object') {
+        file = f.file || f.url;
+        type = f.type || null;
+        quality = f.quality || null;
+        headers = f.headers && typeof f.headers === 'object' ? f.headers : {};
+      }
+
+      if (typeof file !== 'string') continue;
+      
+      // Handle protocol-relative URLs
+      if (file.startsWith('//')) {
+        file = 'https:' + file;
+      }
+      
       if (!/^https?:\/\//i.test(file)) continue;
 
       const source = {
         source_id: sourceIdFor(file, provider),
         provider,
         file,
-        type: inferType(file, f.type),
-        quality: normalizeQuality(f.quality),
-        headers: f.headers && typeof f.headers === 'object' ? f.headers : {},
+        type: inferType(file, type),
+        quality: normalizeQuality(quality),
+        headers,
         probe_result: { status: 'not_probed', hasVideo: null },
       };
       normalizedSources.push(source);
@@ -335,7 +410,7 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     }
   }
 
-  if (process.argv.includes('--debug')) {
+  if (shouldDebug()) {
     console.log(`[Pipeline] Collected ${normalizedSources.length} files and ${normalizedSubs.length} subtitles from providers`);
   }
 
@@ -392,13 +467,13 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
   stageDurations.probe_ms = Date.now() - tProbeStart;
 
   const tScoreStart = Date.now();
-  saveStats(stats);
+  await saveStats(stats);
   stageDurations.score_ms = Date.now() - tScoreStart;
 
   const tRankStart = Date.now();
-  const ranked = deduped
-    .filter((s) => s.probe_result.status !== 'no_video')
-    .sort((a, b) => b.score - a.score);
+  const nonNoVideo = deduped.filter((s) => s.probe_result.status !== 'no_video');
+  const rankingPool = nonNoVideo.length > 0 ? nonNoVideo : deduped;
+  const ranked = rankingPool.slice().sort((a, b) => b.score - a.score);
   stageDurations.rank_ms = Date.now() - tRankStart;
 
   const groupedByQuality = {};
@@ -416,7 +491,7 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     subtitles.push(sub);
   }
 
-  if (process.argv.includes('--debug')) {
+  if (shouldDebug()) {
     console.log(`[Pipeline] Final subtitle count: ${subtitles.length}`);
   }
 
@@ -437,6 +512,11 @@ export async function runSourcePipeline(rawProviderResults, options = {}) {
     },
   };
 
-  console.log(`[DIAG-B] subtitles in pipeline response: ${JSON.stringify(result?.subtitles?.length)} items`);
+  if (shouldDebug()) {
+    process.stderr.write(
+      `[DIAG-B] subtitles in pipeline response: ${result?.subtitles?.length} items\n`
+    );
+  }
   return result;
 }
+

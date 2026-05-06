@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.utils.source_strategy import (
     build_quality_menu_options,
+    canonicalize_quality,
     filter_sources_for_quality,
     quality_sort_key,
     sort_manifest_qualities,
@@ -171,11 +172,24 @@ class TestSourceStrategy:
         assert mode == "auto"
         assert filtered == files
 
-    def test_filter_sources_unavailable_tagged(self):
+    def test_filter_sources_fallback_tagged(self):
         files = [{"file": "https://a.m3u8", "quality": "360p"}]
         filtered, mode = filter_sources_for_quality(files, "1080p")
-        assert mode == "unavailable_tagged"
-        assert filtered == []
+        assert mode == "fallback_tagged"
+        assert filtered == files
+
+    def test_filter_sources_handles_provider_quality_aliases(self):
+        files = [{"file": "https://a.m3u8", "quality": "astra"}]
+        filtered, mode = filter_sources_for_quality(files, "1080p")
+        assert mode == "ok_exact"
+        assert filtered == files
+
+    def test_canonicalize_quality_non_standard_tags(self):
+        assert canonicalize_quality("hd") == "1080p"
+        assert canonicalize_quality("fhd") == "1080p"
+        assert canonicalize_quality("sd") == "480p"
+        assert canonicalize_quality("low") == "360p"
+        assert canonicalize_quality("auto") == "auto"
 
     def test_filter_sources_enforced_manifest(self):
         """When no quality tags exist, all files should be returned for manifest enforcement."""

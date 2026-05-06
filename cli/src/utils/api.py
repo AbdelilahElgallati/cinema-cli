@@ -1,15 +1,27 @@
+import datetime
+import asyncio
 import os
-import time
 import random
+import sys
 import threading
+import time
 import uuid
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import requests
+import httpx
 import urllib3
 from requests.adapters import HTTPAdapter
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+)
 from src.config import BACKEND_URL, TMDB_API_KEY, console
+from src.utils import app_logger
 from src.utils.app_logger import log_event
 from urllib3.util.retry import Retry
 
@@ -65,7 +77,16 @@ def create_session_with_retries():
 class APIClient:
     def __init__(self, settings):
         self.session = create_session_with_retries()
-        self.timeout = (10, 30)
+        self.timeout = (10, 60)  # 10s connect, 60s read
+        self._tmdb_timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
+        self._tmdb_client = httpx.AsyncClient(
+            timeout=self._tmdb_timeout,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "X-Client-Type": "cinema-cli",
+            },
+        )
         self.settings = settings
         self._source_cache = {}  # Local cache: {cache_key: {"sources": [...], "timestamp": float, "success_count": int}}
         self._cache_ttl = 300  # 5 minutes cache TTL
@@ -74,6 +95,44 @@ class APIClient:
 
     def _new_correlation_id(self):
         return f"cinema-{uuid.uuid4().hex[:12]}"
+
+    async def _aclose_tmdb_client(self):
+        await self._tmdb_client.aclose()
+
+    def close(self):
+        try:
+            self._run_async(self._aclose_tmdb_client())
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _run_async(self, coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result = {"value": None, "error": None}
+        done = threading.Event()
+
+        def _worker():
+            try:
+                result["value"] = asyncio.run(coro)
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(target=_worker, daemon=True).start()
+        done.wait()
+        if result["error"] is not None:
+            raise result["error"]
+        return result["value"]
 
     def _candidate_backends(self):
         """Return backend URL candidates in priority order.
@@ -152,21 +211,34 @@ class APIClient:
         
         return base_score
 
-    def get_tmdb_data(self, endpoint, params=None):
+    async def _get_tmdb_data_async(self, endpoint, params=None):
         url = f"https://api.themoviedb.org/3/{endpoint}"
         api_key = self.settings.get("tmdb_key") or TMDB_API_KEY
         default_params = {"api_key": api_key, "language": "en-US"}
         if params:
             default_params.update(params)
         try:
-            resp = self.session.get(url, params=default_params, timeout=self.timeout)
+            resp = await self._tmdb_client.get(url, params=default_params)
             resp.raise_for_status()
             return resp.json()
-        except Exception:
-            console.print("[bold red]Error fetching metadata from TMDB. Check your API key and connection.[/bold red]")
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            safe_msg = str(e).replace(api_key, "***") if api_key else str(e)
+            log_event("api", f"TMDB request failed: {safe_msg}", level="ERROR")
+            console.print(f"[bold red]Error fetching metadata from TMDB: {safe_msg}[/bold red]")
+            return None
+        except (ValueError, KeyError) as e:
+            log_event("api", f"TMDB parse error: {e}", level="ERROR")
+            console.print("[bold red]Error parsing TMDB response.[/bold red]")
+            return None
+        except Exception as e:
+            safe_msg = str(e).replace(api_key, "***") if api_key else str(e)
+            log_event("api", f"Unexpected TMDB error: {safe_msg}", level="ERROR")
             return None
 
-    def get_sources_api(self, tmdb_id, media_type, season=None, episode=None, force_refresh=False):
+    def get_tmdb_data(self, endpoint, params=None):
+        return self._run_async(self._get_tmdb_data_async(endpoint, params=params))
+
+    def get_sources_api(self, tmdb_id, media_type, season=None, episode=None, force_refresh=False, quiet=False):
         """
         Get streaming sources with enhanced reliability.
         
@@ -176,6 +248,7 @@ class APIClient:
             season: Season number (for TV)
             episode: Episode number (for TV)
             force_refresh: If True, bypass cache and fetch fresh sources
+            quiet: If True, disable progress display
         """
         cache_key = self._get_cache_key(tmdb_id, media_type, season, episode)
         
@@ -192,6 +265,7 @@ class APIClient:
             season,
             episode,
             force_refresh=force_refresh,
+            quiet=quiet,
         )
         
         if data and data.get("files"):
@@ -218,6 +292,7 @@ class APIClient:
         episode=None,
         max_retries=2,
         force_refresh=False,
+        quiet=False,
     ):
         """Fetch sources from backend with retry and jitter."""
         backend_bases = self._candidate_backends()
@@ -225,30 +300,33 @@ class APIClient:
         
         last_error = None
         
-        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TaskProgressColumn(),
             console=console,
-            transient=True
+            transient=True,
+            disable=quiet
         ) as progress:
             task = progress.add_task("[cyan]Searching for sources...", total=(max_retries + 1) * len(backend_bases))
             
             for attempt in range(max_retries + 1):
                 if attempt > 0:
-                    progress.update(task, description=f"[cyan]Retry {attempt}/{max_retries}...")
+                    if not quiet:
+                        progress.update(task, description=f"[cyan]Retry {attempt}/{max_retries}...")
+                    time.sleep(min(2 * attempt, 5))
+
+                any_backend_busy = False
 
                 for base in backend_bases:
                     try:
-                        progress.update(task, description=f"[cyan]Scraping {base}...")
+                        if not quiet:
+                            progress.update(task, description=f"[cyan]Scraping {base} (Attempt {attempt+1})...")
                         if media_type == "movie":
                             url = f"{base}/movie/{tmdb_id}"
                         else:
                             url = f"{base}/tv/{tmdb_id}?s={season}&e={episode}"
-
                         request_headers = {
                             "X-Client-Type": "cinema-cli",
                             "X-Correlation-Id": correlation_id,
@@ -274,9 +352,7 @@ class APIClient:
                         if resp.status_code == 200:
                             data = resp.json()
                             
-                            from . import app_logger
                             app_logger.debug(f"[DIAG-C] raw backend response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
-                            app_logger.debug(f"[DIAG-C] subtitle count from backend: {len(data.get('subtitles', [])) if isinstance(data, dict) else 'N/A'}")
                             
                             # Normalize response format early
                             if isinstance(data, list):
@@ -287,7 +363,6 @@ class APIClient:
                                     "pipeline": {},
                                 }
                             
-                            import sys
                             if "--debug" in sys.argv:
                                 app_logger.debug(f"[DEBUG api] raw subtitles from backend: {data.get('subtitles')}")
 
@@ -322,39 +397,45 @@ class APIClient:
                                 )
                                 return data
 
-                            # Empty response - backend might need time, retry
-                            if attempt < max_retries:
-                                jitter = random.uniform(0.5, 1.5)
-                                time.sleep(1 * (attempt + 1) * jitter)
-                                progress.advance(task)
-                                continue
+                            # Empty response - might be scraping
+                            app_logger.debug(f"Backend {base} returned 200 but empty data.")
 
                         elif resp.status_code in [429, 503, 504]:
-                            # Rate limited or server busy - wait and retry
-                            if attempt < max_retries:
-                                wait_time = 2 ** attempt + random.uniform(0, 1)
-                                progress.update(task, description=f"[yellow]Server busy, waiting {wait_time:.1f}s...")
-                                time.sleep(wait_time)
-                                progress.advance(task)
-                                continue
-
+                            any_backend_busy = True
+                            last_error = f"HTTP {resp.status_code} (Busy)"
                         else:
                             last_error = f"HTTP {resp.status_code}"
 
+                    except requests.exceptions.ConnectTimeout:
+                        last_error = "Connect timeout"
+                        any_backend_busy = True
+                    except requests.exceptions.ReadTimeout:
+                        last_error = "Read timeout (scraping takes too long)"
+                        any_backend_busy = True
                     except requests.exceptions.Timeout:
                         last_error = "Timeout"
+                        any_backend_busy = True
                     except requests.exceptions.ConnectionError:
-                        last_error = "Connection error"
+                        last_error = "Connection refused (backend down?)"
+                        any_backend_busy = True
                     except Exception as e:
-                        last_error = str(e)
+                        last_error = f"Error: {str(e)}"
                     
                     progress.advance(task)
 
-            if attempt < max_retries:
-                # brief backoff before trying all backends again
-                time.sleep(1.0 + attempt)
+                # End of backend loop for this attempt. 
+                # If we are here, no backend gave us results.
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) if any_backend_busy else 1.0
+                    jitter = random.uniform(0.5, 1.5)
+                    total_wait = wait_time * jitter
+                    
+                    if not quiet:
+                        progress.update(task, description=f"[yellow]No data yet, waiting {total_wait:.1f}s before retry...")
+                    time.sleep(total_wait)
         
-        if last_error:
+        
+        if last_error and not quiet:
             console.print(f"[red]  Backend error: {last_error}[/red]")
         
         return {"correlation_id": correlation_id}
@@ -387,10 +468,19 @@ class APIClient:
         
         return sorted(sources, key=get_score, reverse=True)
 
-    def get_sources_enhanced(self, tmdb_id, media_type, season=None, episode=None, min_sources=3):  # NOSONAR
+    def get_sources_enhanced(self, tmdb_id, media_type, season=None, episode=None, min_sources=3, refresh_on_missing_subtitles=True, quiet=False):  # NOSONAR
         """
         Enhanced source fetching with multiple attempts and source aggregation.
         Tries to get at least min_sources working sources and at least some subtitles.
+
+        Args:
+            tmdb_id: TMDB ID of the content.
+            media_type: "movie" or "tv".
+            season: Season number (for TV).
+            episode: Episode number (for TV).
+            min_sources: Minimum number of sources to aggregate before considering the cache "sufficient".
+            refresh_on_missing_subtitles: If True, trigger a forced refresh if no subtitles are found in the initial cache hit.
+            quiet: If True, disable progress display.
         """
         all_sources = []
         seen_urls = set()
@@ -407,7 +497,7 @@ class APIClient:
                     subtitle_map[sub_url] = sub
         
         # First attempt - normal fetch
-        data = self.get_sources_api(tmdb_id, media_type, season, episode)
+        data = self.get_sources_api(tmdb_id, media_type, season, episode, quiet=quiet)
         if data and data.get("files"):
             for src in data["files"]:
                 url = src.get("file", "")
@@ -417,13 +507,24 @@ class APIClient:
         _merge_subtitles(data.get("subtitles") if data else [])
         
         # Determine if we need a refresh (too few sources OR no subtitles found)
-        needs_refresh = (len(all_sources) < min_sources) or (not subtitle_map)
+        # ONLY trigger refresh if the data was served from cache or was empty.
+        # If it was already a fresh scrape, don't immediately retry.
+        from_cache = data.get("from_cache", False) if data else False
+        
+        # If data is None or empty dict, we definitely want a fresh try
+        is_empty = not data or (not data.get("files") and not data.get("subtitles"))
+        
+        needs_refresh = (from_cache or is_empty) and (
+            (len(all_sources) < min_sources) or 
+            (refresh_on_missing_subtitles and not subtitle_map)
+        )
         
         # If we don't have enough data, try fresh fetch
         if needs_refresh:
-            reason = "too few sources" if len(all_sources) < min_sources else "no subtitles"
-            console.print(f"[dim]  {reason.capitalize()} in cache, fetching fresh...[/dim]")
-            fresh_data = self.get_sources_api(tmdb_id, media_type, season, episode, force_refresh=True)
+            if not quiet:
+                reason = "too few sources" if len(all_sources) < min_sources else "no subtitles"
+                console.print(f"[dim]  {reason.capitalize()} in cache, fetching fresh...[/dim]")
+            fresh_data = self.get_sources_api(tmdb_id, media_type, season, episode, force_refresh=True, quiet=quiet)
             if fresh_data and fresh_data.get("files"):
                 for src in fresh_data["files"]:
                     url = src.get("file", "")
@@ -448,7 +549,6 @@ class APIClient:
     def get_new_movies(self, page=1):
         """Get movies currently in theaters or digitally released recently."""
         # release_date.lte={today}&release_date.gte={30_days_ago}
-        import datetime
 
         today = datetime.date.today()
         past = today - datetime.timedelta(days=45)
@@ -464,7 +564,6 @@ class APIClient:
 
     def get_new_episodes(self, page=1):
         """Get TV shows that aired episodes in the last 7 days."""
-        import datetime
 
         today = datetime.date.today()
         past = today - datetime.timedelta(days=7)

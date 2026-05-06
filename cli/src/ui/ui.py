@@ -2,6 +2,7 @@ import atexit
 import html
 import os
 import re
+import socket
 import subprocess
 import sys
 import textwrap
@@ -33,10 +34,12 @@ from src.config import (
     SETTINGS_FILE,
     SUCCESS,
     TEXT,
+    THEMES,
     WARNING,
+    _active_theme_name,
     console,
 )
-from src.utils.storage import load_json_data
+from src.utils.storage import load_json_data, save_json_data
 
 
 
@@ -72,7 +75,6 @@ def _strip_rich(text: str) -> str:
 def _get_highlight_fg() -> str:
     """Return the per-theme highlight foreground colour."""
     try:
-        from src.config import THEMES, _active_theme_name
         return THEMES[_active_theme_name].get("highlight_fg", "#FFFFFF")
     except Exception:
         return "#FFFFFF"
@@ -132,7 +134,6 @@ def show_splash():  # NOSONAR
         return [f"{base}/", f"{base}/health", f"{base}/proxy/status"]
 
     def _is_backend_running(url: str) -> bool:
-        from urllib.parse import urlparse
         for probe_url in _probe_urls(url):
             try:
                 parsed = urlparse(probe_url)
@@ -146,12 +147,19 @@ def show_splash():  # NOSONAR
                         "Accept": "*/*"
                     }
                 )
-                with urlopen(req, timeout=2) as resp:
+                # Reduced timeout for non-blocking health check
+                with urlopen(req, timeout=1) as resp:
                     if 200 <= int(getattr(resp, "status", 0)) < 400:
                         return True
             except (URLError, ValueError):
                 continue
         return False
+
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            return int(sock.getsockname()[1])
 
     def _maybe_start_backend(url: str):
         try:
@@ -165,18 +173,9 @@ def show_splash():  # NOSONAR
         if _is_backend_running(url):
             return None
 
-        def _backend_launch_env(target_url: str):
+        def _backend_launch_env(port: int):
             env = os.environ.copy()
-            try:
-                parsed = urlparse(target_url or "")
-                host = (parsed.hostname or "").lower()
-                if host not in ("localhost", "127.0.0.1", ""):
-                    return env
-                port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                if port:
-                    env["PORT"] = str(port)
-            except Exception:
-                pass
+            env["PORT"] = str(port)
             return env
 
         backend_dir = os.path.abspath(
@@ -185,13 +184,18 @@ def show_splash():  # NOSONAR
         show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
         stdout = None if show_logs else subprocess.DEVNULL
         stderr = None if show_logs else subprocess.DEVNULL
-        launch_env = _backend_launch_env(url)
+        parsed_backend_url = urlparse(url or "http://localhost:3010")
+        launch_host = parsed_backend_url.hostname or "localhost"
+        launch_scheme = parsed_backend_url.scheme or "http"
+        launch_port = _find_free_port()
+        launch_url = f"{launch_scheme}://{launch_host}:{launch_port}"
+        launch_env = _backend_launch_env(launch_port)
 
+        npm_command = ["npm.cmd", "start"] if os.name == "nt" else ["npm", "start"]
         try:
             proc = subprocess.Popen(
-                "npm start",
+                npm_command,
                 cwd=backend_dir,
-                shell=True,
                 stdout=stdout,
                 stderr=stderr,
                 env=launch_env,
@@ -209,7 +213,13 @@ def show_splash():  # NOSONAR
                 return None
 
         for _ in range(10):
-            if _is_backend_running(url):
+            if _is_backend_running(launch_url):
+                os.environ["BACKEND_URL"] = launch_url
+                settings["backend"] = launch_url
+                try:
+                    save_json_data(SETTINGS_FILE, settings)
+                except Exception:
+                    pass
                 return proc
             time.sleep(0.5)
 
@@ -217,15 +227,6 @@ def show_splash():  # NOSONAR
 
     settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict) or {}
     backend_url = settings.get("backend") or BACKEND_URL
-    _backend_proc = _maybe_start_backend(backend_url)
-    if _backend_proc:
-        atexit.register(
-            lambda: (
-                _backend_proc.terminate()
-                if _backend_proc and _backend_proc.poll() is None
-                else None
-            )
-        )
 
     _steps = [
         "Initialising engine...",
@@ -234,7 +235,7 @@ def show_splash():  # NOSONAR
         "Ready!",
     ]
     
-    # Premium loading spinner
+    # Premium loading spinner - backend start moved inside to keep spinner animated
     with Progress(
         SpinnerColumn(spinner_name="point", style=f"bold {ACCENT}"),
         TextColumn(f"[{TEXT}]{{task.description}}[/{TEXT}]"),
@@ -242,10 +243,24 @@ def show_splash():  # NOSONAR
         transient=True,
     ) as progress:
         task = progress.add_task(_steps[0], total=None)
-        time.sleep(0.7)
-        for step in _steps[1:]:
-            progress.update(task, description=step)
-            time.sleep(0.4)
+        time.sleep(0.4)
+        
+        progress.update(task, description=_steps[1])
+        time.sleep(0.4)
+        
+        progress.update(task, description=_steps[2])
+        _backend_proc = _maybe_start_backend(backend_url)
+        if _backend_proc:
+            atexit.register(
+                lambda: (
+                    _backend_proc.terminate()
+                    if _backend_proc and _backend_proc.poll() is None
+                    else None
+                )
+            )
+            
+        progress.update(task, description=_steps[3])
+        time.sleep(0.4)
 
 
 def show_goodbye():

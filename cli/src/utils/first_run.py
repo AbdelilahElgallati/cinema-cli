@@ -252,7 +252,7 @@ def _step_tools() -> dict[str, bool]:  # NOSONAR
     return status
 
 
-def _step_tmdb_key():
+def _step_tmdb_key() -> str | None:
     _banner("Step 3 / 8 — TMDB API key")
     _print(
         "  Cinema CLI uses The Movie Database (TMDB) for movie/TV metadata.\n"
@@ -265,7 +265,7 @@ def _step_tmdb_key():
         _print(f"[green]✓  TMDB key already configured: {existing[:8]}…[/green]")
         change = _input("  Replace it? (y/N): ").strip().lower()
         if change not in ("y", "yes"):
-            return existing
+            return None
 
     while True:
         key = _input("  Paste your TMDB API key (or press Enter to skip): ").strip()
@@ -279,7 +279,7 @@ def _step_tmdb_key():
         _print("[red]  That doesn't look like a valid API key. Try again.[/red]")
 
 
-def _step_opensubs_key():
+def _step_opensubs_key() -> str | None:
     _banner("Step 4 / 8 — OpenSubtitles API key  (optional)")
     _print(
         "  OpenSubtitles provides fallback subtitles when a source has none.\n"
@@ -292,7 +292,7 @@ def _step_opensubs_key():
         _print(f"[green]✓  OpenSubtitles key already configured: {existing[:8]}…[/green]")
         change = _input("  Replace it? (y/N): ").strip().lower()
         if change not in ("y", "yes"):
-            return existing
+            return None
 
     key = _input("  Paste your OpenSubtitles API key (or press Enter to skip): ").strip()
     if key:
@@ -350,6 +350,13 @@ def _step_backend_config() -> tuple[int, str]:
 
     default_url = existing_url or f"http://localhost:{port}"
     backend_url = _input(f"  Backend URL [default: {default_url}]: ").strip() or default_url
+
+    if not backend_url.startswith(("http://", "https://")):
+        _print("❌  Backend URL must start with http:// or https://")
+        _print("    Example: http://localhost:3010")
+        # Re-prompt or use default — do NOT write the invalid value
+        backend_url = f"http://localhost:{port}"
+        _print(f"ℹ️   Using default: {backend_url}")
 
     _print(f"[green]  ✓  Backend set to {backend_url} (PORT={port})[/green]")
     return port, backend_url

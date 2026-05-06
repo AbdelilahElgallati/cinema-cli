@@ -3,18 +3,26 @@ import { languageMap } from '../../../utils/languages.js';
 import { ErrorObject } from '../../../helpers/ErrorObject.js';
 
 const DOMAIN = 'https://vidrock.net';
-const PASSPHRASE = process.env.VIDROCK_PASSPHRASE || 'x7k9mPqT2rWvY8zA5bC3nF6hJ2lK4mN9';
-const shouldDebug = process.argv.includes('--debug');
+function getPassphrase() {
+  const passphrase = (process.env.VIDROCK_PASSPHRASE || '').trim();
+  if (!passphrase) {
+    throw new Error(
+      '[VidRock] VIDROCK_PASSPHRASE environment variable is required but not set.'
+    );
+  }
+  return passphrase;
+}
+const shouldDebug = () => process.argv.includes('--debug') || process.env.DEBUG === 'true' || process.env.LOG_LEVEL === 'debug';
 
 export async function getVidRock(media) {
-  if (shouldDebug) {
+  if (shouldDebug()) {
     console.log('[getVidRock] Function called');
     console.log('[getVidRock] Media input:', JSON.stringify(media, null, 2));
   }
 
   // media should contain: { type, tmdb, season?, episode? }
   const link = await getLink(media);
-  if (shouldDebug) {
+  if (shouldDebug()) {
     console.log('[getVidRock] Generated link from getLink():', link);
   }
 
@@ -35,7 +43,7 @@ export async function getVidRock(media) {
       'sec-ch-ua-platform': '"Windows"',
     };
 
-    if (shouldDebug) {
+    if (shouldDebug()) {
       console.log('[getVidRock] Request headers:', JSON.stringify(requestHeaders, null, 2));
       console.log('[getVidRock] Making fetch request to:', link);
     }
@@ -44,7 +52,7 @@ export async function getVidRock(media) {
       headers: requestHeaders,
     });
 
-    if (shouldDebug) {
+    if (shouldDebug()) {
       console.log('[getVidRock] Fetch response status:', sources.status);
       console.log('[getVidRock] Fetch response ok:', sources.ok);
     }
@@ -68,7 +76,7 @@ export async function getVidRock(media) {
     }
 
     const rawResponse = await sources.json();
-    if (shouldDebug) {
+    if (shouldDebug()) {
       console.log('[getVidRock] Raw response keys:', Object.keys(rawResponse));
       console.log('[getVidRock] Raw response sample:', JSON.stringify(rawResponse).substring(0, 500));
     }
@@ -115,28 +123,36 @@ export async function getVidRock(media) {
       }
     });
 
-    console.log(`[DIAG-A] subtitles extracted from VidRock: ${subtitles.length} items`);
-    if (subtitles.length > 0) {
-      console.log(`[DIAG-A] first subtitle sample: ${JSON.stringify(subtitles[0])}`);
+    if (shouldDebug()) {
+      process.stderr.write(`[VidRock] subtitles count: ${subtitles.length}\n`);
+      if (subtitles.length > 0) {
+        process.stderr.write(`[VidRock] first: ${JSON.stringify(subtitles[0])}\n`);
+      }
     }
 
     const rawSources = Array.isArray(rawResponse)
       ? rawResponse
       : Object.entries(rawResponse).map(([key, val]) => {
-          if (val && typeof val === 'object') val.quality = val.quality || key;
-          return val;
-        });
+          if (val && typeof val === 'object') {
+            val.quality = val.quality || key;
+            return val;
+          } else if (typeof val === 'string') {
+            return {
+              url: val,
+              quality: key
+            };
+          }
+          return null;
+        }).filter(Boolean);
 
     const formattedSources = rawSources
-      .filter((source) => source && source.url && typeof source.url === 'string')
+      .filter((source) => source && (source.url || source.file) && typeof (source.url || source.file) === 'string')
       .map((source) => {
-        let url = source.url;
+        let url = source.url || source.file;
         let quality = source.quality || 'unknown';
 
         if (url.includes('.m3u8')) {
           // Transform variant HLS to master playlist URL to ensure audio availability.
-          // VidRock variant URLs like .../id/S/E/480/playlist.m3u8 do not contain audio group info.
-          // The master playlist at .../id/S/E/playlist.m3u8 contains the #EXT-X-MEDIA audio tracks.
           const masterUrl = url.replace(/\/(\d+)\/playlist\.m3u8$/, '/playlist.m3u8');
           if (masterUrl !== url) {
             url = masterUrl;
@@ -153,7 +169,9 @@ export async function getVidRock(media) {
           type: url.includes('.m3u8') ? 'hls' : (url.includes('.mp4') ? 'mp4' : 'unknown'),
           lang: languageMap[source.language] || source.language,
           headers: {
-            Referer: `${DOMAIN}/movie/${media.tmdb}`,
+            Referer: media.type === 'tv' 
+              ? `${DOMAIN}/tv/${media.tmdb}/${media.season}/${media.episode}`
+              : `${DOMAIN}/movie/${media.tmdb}`,
             Origin: DOMAIN,
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -200,8 +218,24 @@ export async function getVidRock(media) {
 async function encryptItemId(itemId) {
   try {
     const textEncoder = new TextEncoder();
-    const keyData = textEncoder.encode(PASSPHRASE);
-    const iv = keyData.slice(0, 16);
+    const passphraseBytes = textEncoder.encode(getPassphrase());
+
+    let keyData = passphraseBytes;
+    if (![16, 24, 32].includes(keyData.length)) {
+      // Accept arbitrary passphrase lengths by deriving a 32-byte AES key.
+      const digest = await webcrypto.subtle.digest('SHA-256', passphraseBytes);
+      keyData = new Uint8Array(digest);
+      if (shouldDebug()) {
+        console.warn('[VidRock] VIDROCK_PASSPHRASE length is non-standard; using SHA-256 derived key.');
+      }
+    }
+
+    let iv = passphraseBytes.slice(0, 16);
+    if (iv.length < 16) {
+      const paddedIv = new Uint8Array(16);
+      paddedIv.set(iv);
+      iv = paddedIv;
+    }
 
     const key = await webcrypto.subtle.importKey('raw', keyData, { name: 'AES-CBC' }, false, [
       'encrypt',
@@ -227,7 +261,7 @@ async function encryptItemId(itemId) {
 }
 
 async function getLink(media) {
-  if (shouldDebug) {
+  if (shouldDebug()) {
     console.log('[getLink] Starting link generation');
   }
 

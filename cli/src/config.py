@@ -15,10 +15,13 @@ if not os.getenv("TMDB_API_KEY") or not os.getenv("BACKEND_URL"):
     load_dotenv(root_env)
 
 # Configuration
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3010")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:3010")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 OPENSUBTITLES_API_KEY = os.getenv("OPENSUBTITLES_API_KEY", "")
 SUBDL_API_KEY = os.getenv("SUBDL_API_KEY", "")
+MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", 3))
+MAX_CONCURRENT_SOURCE_FETCHES = int(os.getenv("MAX_CONCURRENT_SOURCE_FETCHES", 3))
+DEFAULT_SUBTITLE_VERIFY_TLS = True
 
 APP_VERSION = "2.0.0"
 

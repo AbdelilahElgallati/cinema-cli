@@ -6,7 +6,7 @@
       "timeout": 0
     },
     "getTwoEmbed": {
-      "success": 126,
+      "success": 191,
       "no_video": 0,
       "timeout": 0
     },
@@ -16,12 +16,17 @@
       "timeout": 0
     },
     "getVidSrc": {
-      "success": 108,
+      "success": 310,
       "no_video": 0,
       "timeout": 0
     },
     "getMultiembed": {
-      "success": 45,
+      "success": 66,
+      "no_video": 0,
+      "timeout": 0
+    },
+    "test-provider": {
+      "success": 1,
       "no_video": 0,
       "timeout": 0
     }

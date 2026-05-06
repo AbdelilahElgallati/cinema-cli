@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cinema-cli"
+version = "1.0.2"
+description = "Terminal-based TUI app for streaming and downloading movies and TV shows."
+requires-python = ">=3.11"
+dependencies = [
+  "auditok==0.1.5",
+  "certifi==2026.2.25",
+  "chardet==5.2.0",
+  "charset-normalizer==3.4.6",
+  "colorama==0.4.6",
+  "faust-cchardet==2.1.19",
+  "ffmpeg-python==0.2.0",
+  "ffsubsync==0.4.31",
+  "future==1.0.0",
+  "httpx==0.28.1",
+  "idna==3.11",
+  "iniconfig==2.3.0",
+  "markdown-it-py==4.0.0",
+  "mdurl==0.1.2",
+  "numpy==2.4.3",
+  "packaging==26.0",
+  "pluggy==1.6.0",
+  "prompt_toolkit==3.0.52",
+  "Pygments==2.19.2",
+  "pysubs2==1.8.0",
+  "pytest==9.0.2",
+  "python-dotenv==1.2.2",
+  "requests==2.32.5",
+  "rich==14.3.3",
+  "srt==3.5.3",
+  "tqdm==4.67.3",
+  "typing_extensions==4.15.0",
+  "urllib3==2.6.3",
+  "wcwidth==0.6.0",
+  "webrtcvad-wheels==2.0.14",
+  "yt-dlp==2026.3.13",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff==0.11.13",
+  "mypy==1.16.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["cli", "cli/src"]
+exclude = ["pro-ai-orchestrator"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+pretty = true
+exclude = "(^pro-ai-orchestrator/)"

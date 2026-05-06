@@ -66,6 +66,18 @@ export async function getVidSrc(media) {
         },
       })
     ).data;
+
+    if (iframeHtml2.includes('cf-turnstile') || iframeHtml2.includes('challenges.cloudflare.com')) {
+      return new ErrorObject(
+        'Cloudflare Turnstile detected',
+        'VidSrc',
+        403,
+        'The provider is protected by Cloudflare Turnstile. Automation is currently blocked.',
+        true,
+        true
+      );
+    }
+
     if (shouldDebug) {
       console.log('[VidSrc] Second iframe HTML length:', iframeHtml2.length);
       console.log('[VidSrc] Searching for third iframe with regex:', IFRAME3_SRC_RE);

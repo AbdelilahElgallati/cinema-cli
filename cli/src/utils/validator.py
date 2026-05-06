@@ -203,14 +203,22 @@ def verify_source(url, headers=None, timeout=8):  # NOSONAR
     
     # Standard headers to mimic browser/CLI requests
     default_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
-        "Origin": "https://vidrock.org",
-        "Referer": "https://vidrock.org/",
     }
     
+    # Add Origin/Referer if we can guess them from URL or they are provided
+    url_origin = f"{url.split('://')[0]}://{url.split('://')[1].split('/')[0]}" if "://" in url else None
+    if url_origin:
+        if "vidrock" in url_origin:
+            default_headers["Origin"] = "https://vidrock.net"
+            default_headers["Referer"] = "https://vidrock.net/"
+        elif "vidzee" in url_origin:
+            default_headers["Origin"] = "https://player.vidzee.wtf"
+            default_headers["Referer"] = "https://player.vidzee.wtf/"
+
     if headers:
         current_headers = default_headers.copy()
         current_headers.update(headers)
@@ -219,6 +227,8 @@ def verify_source(url, headers=None, timeout=8):  # NOSONAR
 
     try:
         # Use a Range request which is more reliable for media servers
+        # BUT some CDNs (like VidRock/Cloudflare) might block it if not handled perfectly
+        # So we try it, but if it fails with 403, we might still trust HLS
         current_headers["Range"] = "bytes=0-1024"
         resp = requests.get(
             url, 
@@ -226,7 +236,7 @@ def verify_source(url, headers=None, timeout=8):  # NOSONAR
             timeout=timeout, 
             allow_redirects=True, 
             stream=True, 
-            verify=True,  # noqa: S4830 - SSL verification enabled; yt-dlp provides additional security
+            verify=True,  # noqa: S4830
         )
         
         # Accept various success codes
@@ -235,35 +245,37 @@ def verify_source(url, headers=None, timeout=8):  # NOSONAR
             content_type = resp.headers.get("content-type", "").lower()
             if any(x in content_type for x in ["video", "audio", "mpegurl", "octet-stream", "application"]):
                 return True, "verified"
-            # For HLS, content might be text/plain
+            # For HLS, content might be text/plain or other
             if url_type == "hls":
                 return True, "hls_verified"
             return True, "status_ok"
         
-        # For HLS/worker URLs, be more lenient
-        if url_type in ["hls", "worker"] and resp.status_code in [200, 206, 301, 302, 403]:
-            return True, "trusted_type"
+        # For HLS/worker URLs, be more lenient with 403/429/503
+        # because the player (yt-dlp/mpv) often has better retry/bypass logic
+        if url_type in ["hls", "worker"] and resp.status_code in [200, 206, 301, 302, 403, 429, 503]:
+            return True, f"trusted_type_{resp.status_code}"
             
     except requests.exceptions.Timeout:
-        # Timeout might just mean slow server - trust HLS/worker URLs
         if url_type in ["hls", "worker"]:
             return True, "timeout_trusted"
         return False, "timeout"
     except requests.exceptions.SSLError:
-        # SSL errors are common, yt-dlp handles them with --no-check-certificates
         if url_type in ["hls", "worker"]:
             return True, "ssl_trusted"
         return False, "ssl_error"
     except requests.exceptions.ConnectionError:
+        # Even on connection error, if it's HLS, we might want to try it
+        if url_type == "hls":
+            return True, "conn_trusted_hls"
         return False, "connection_error"
     except Exception as e:
         if url_type == "hls":
             return True, "hls_fallback"
         return False, str(e)[:50]
     
-    # Final fallback: trust HLS streams since yt-dlp is very good at handling them
+    # Final fallback: trust HLS streams
     if url_type == "hls":
-        return True, "hls_fallback"
+        return True, "hls_final_fallback"
         
     return False, "unknown_failure"
 
@@ -288,7 +300,7 @@ def select_working_source(sources, skip_validation=False, max_parallel=5, timeou
         return None
     
     # Priority providers that are known to be reliable
-    priority_providers = ["vidsrc", "vidsrccc", "2embed", "autoembed", "multiembed", "vidrock", "embedsu"]
+    priority_providers = ["vidsrc", "vidsrccc", "2embed", "autoembed", "multiembed", "vidrock", "embedsu", "vidzee"]
     
     # Sort sources: prioritize known reliable providers and quality
     def source_priority(src):
@@ -299,32 +311,31 @@ def select_working_source(sources, skip_validation=False, max_parallel=5, timeou
         score = 100  # Base score
 
         # Persistent health score: higher health → lower sort key value (picked first).
-        # Scale from [0,100] health → [-30, +30] sort adjustment.
         try:
             health = _get_score_store().get_score(provider)
-            score -= int((health - 50) * 0.6)   # health=100 → -30, health=0 → +30
+            score -= int((health - 50) * 0.6)
         except Exception:
             pass
 
         # Provider priority
         for i, p in enumerate(priority_providers):
             if p in provider:
-                score -= (i * 5)  # First providers get higher priority
+                score -= (i * 10)  # Increase gap
                 break
         else:
-            score -= 50  # Unknown provider
+            score -= 20  # Unknown provider
         
         # Quality bonus
-        if "1080" in quality:
-            score -= 5
-        elif "4k" in quality or "2160" in quality:
-            score -= 3
+        if "2160" in quality or "4k" in quality:
+            score -= 15
+        elif "1080" in quality:
+            score -= 10
         elif "720" in quality:
-            score -= 8
+            score -= 5
         
         # HLS bonus (more reliable with yt-dlp)
-        if _M3U8_SIG in url or _HLS_SIG in url:
-            score -= 2
+        if any(sig in url for sig in _HLS_SIGS):
+            score -= 5
         
         return score
     
@@ -366,7 +377,7 @@ def select_working_source(sources, skip_validation=False, max_parallel=5, timeou
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
         # Submit first batch
         futures = {}
-        for i, src in enumerate(valid_sources[:max_parallel * 2]):  # Test first 10 sources
+        for i, src in enumerate(valid_sources[:max_parallel * 3]):  # Test more sources
             future = executor.submit(test_source, (i, src))
             futures[future] = i
         
@@ -401,7 +412,7 @@ def select_working_source(sources, skip_validation=False, max_parallel=5, timeou
     console.print("[yellow]  No validated source, trying HLS fallback...[/yellow]")
     for src in sorted_sources:
         url = _extract_url(src.get("file"))
-        if url and (_M3U8_SIG in url.lower() or "manifest" in url.lower()):
+        if url and any(sig in url.lower() for sig in _HLS_SIGS):
             console.print(f"[yellow]  Using unvalidated HLS: {src.get('provider')}[/yellow]")
             return src
     
@@ -434,14 +445,15 @@ def select_multiple_working_sources(sources, count=3, skip_validation=False, max
         return []
     
     # Priority providers
-    priority_providers = ["vidsrc", "vidsrccc", "2embed", "autoembed", "multiembed", "vidrock"]
+    priority_providers = ["vidsrc", "vidsrccc", "2embed", "autoembed", "multiembed", "vidrock", "embedsu", "vidzee"]
     
     def source_priority(src):
         provider = (src.get("provider") or "").lower()
         quality = (src.get("quality") or "").lower()
+        url = src.get("file", "").lower()
 
         score = 100
-        # Persistent health bias (same formula as select_working_source)
+        # Persistent health bias
         try:
             health = _get_score_store().get_score(provider)
             score -= int((health - 50) * 0.6)
@@ -450,13 +462,18 @@ def select_multiple_working_sources(sources, count=3, skip_validation=False, max
 
         for i, p in enumerate(priority_providers):
             if p in provider:
-                score -= (i * 5)
+                score -= (i * 10)
                 break
         
-        if "1080" in quality:
+        if "2160" in quality or "4k" in quality:
+            score -= 15
+        elif "1080" in quality:
+            score -= 10
+        elif "720" in quality:
             score -= 5
-        elif "4k" in quality:
-            score -= 3
+
+        if any(sig in url for sig in _HLS_SIGS):
+            score -= 5
         
         return score
     
@@ -512,7 +529,7 @@ def select_multiple_working_sources(sources, count=3, skip_validation=False, max
         for src in sorted_sources:
             if src not in working_sources:
                 url = src.get("file", "").lower()
-                if _M3U8_SIG in url or _HLS_SIG in url:
+                if any(sig in url for sig in _HLS_SIGS):
                     working_sources.append(src)
                     if len(working_sources) >= count:
                         break
