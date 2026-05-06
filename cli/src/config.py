@@ -169,7 +169,7 @@ def _load_user_theme() -> str:
             with open(SETTINGS_FILE, encoding="utf-8") as _f:
                 _cfg = json.load(_f)
                 _t = _cfg.get("theme", "cinema")
-                return _t if _t in THEMES else "cinema"
+                return _t if isinstance(_t, str) and _t in THEMES else "cinema"
     except Exception:
         pass
     return "cinema"

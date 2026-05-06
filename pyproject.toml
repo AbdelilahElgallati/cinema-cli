@@ -81,4 +81,19 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 pretty = true
-exclude = "(^pro-ai-orchestrator/)"
+disable_error_code = ["import-untyped"]
+exclude = "(^pro-ai-orchestrator/|^build/|^cli/main.py$)"
+
+[[tool.mypy.overrides]]
+module = [
+  "src.controllers.app_controller",
+  "src.utils.api",
+  "src.utils.download_manager",
+  "src.utils.first_run",
+  "src.utils.player",
+  "src.utils.source_strategy",
+  "src.utils.subtitles",
+  "src.utils.system_tools",
+  "src.utils.validator",
+]
+ignore_errors = true

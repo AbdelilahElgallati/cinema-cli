@@ -65,6 +65,12 @@ def _init_stream_log():
 _stream_log = _init_stream_log()
 
 
+# Kept for backward compatibility with tests and legacy call sites.
+def clear():
+    """Clear the terminal screen."""
+    os.system("cls" if os.name == "nt" else "clear")
+
+
 # ─── IPC Communication ─────────────────────────────────────────────
 def mpv_ipc_send(ipc_path, command):
     """Send a command to mpv via IPC (Unix socket or Windows named pipe)."""
