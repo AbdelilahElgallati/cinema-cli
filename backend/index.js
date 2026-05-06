@@ -211,8 +211,8 @@ const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 
 if (isMain) {
   startup();
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running on http://0.0.0.0:${PORT} (mapped to localhost:${PORT})`);
+  const server = app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Server is running on http://127.0.0.1:${PORT} (mapped to localhost:${PORT})`);
     if (process.argv.includes('--debug')) {
       console.log(`Debug mode is enabled.`);
       console.log('Cache is disabled.');

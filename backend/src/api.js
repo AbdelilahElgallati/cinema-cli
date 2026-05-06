@@ -34,9 +34,15 @@ const GLOBAL_SCRAPE_TIMEOUT_MS = 45000;
 const TIER1_TIMEOUT_MS = 15000;
 const TIER2_TIMEOUT_MS = 30000;
 const PROVIDER_JITTER_MAX_MS = 200;
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROVIDER_STATS_PATH = path.join(__dirname, 'cache', 'provider_stats.json');
+import os from 'os';
+
+function getCacheDir() {
+  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'CinemaCLI', 'cache');
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'CinemaCLI', 'cache');
+  return path.join(os.homedir(), '.local', 'share', 'cinema-cli', 'cache');
+}
+
+const PROVIDER_STATS_PATH = path.join(getCacheDir(), 'provider_stats.json');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

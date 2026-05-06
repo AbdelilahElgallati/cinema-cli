@@ -4,7 +4,15 @@ import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import fetch from 'node-fetch';
 
-const STATS_PATH = path.resolve(process.cwd(), 'src', 'cache', 'provider_stats.json');
+import os from 'os';
+
+function getCacheDir() {
+  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'CinemaCLI', 'cache');
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'CinemaCLI', 'cache');
+  return path.join(os.homedir(), '.local', 'share', 'cinema-cli', 'cache');
+}
+
+const STATS_PATH = path.join(getCacheDir(), 'provider_stats.json');
 const DEFAULT_STATS = { providers: {} };
 
 async function ensureDir(filePath) {

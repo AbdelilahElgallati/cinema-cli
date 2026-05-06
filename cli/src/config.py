@@ -132,18 +132,35 @@ THEMES: dict[str, dict[str, str]] = {
 
 THEME_NAMES = list(THEMES.keys())
 
-# Storage Files
-DATA_DIR = os.path.expanduser("~/.cinema-cli")
-os.makedirs(DATA_DIR, exist_ok=True)
+import platform
 
-HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
-FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
-PLAYBACK_FILE = os.path.join(DATA_DIR, "playback.json")
-SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-WATCH_LATER_FILE = os.path.join(DATA_DIR, "watch_later.json")
-PROVIDER_SCORES_FILE = os.path.join(DATA_DIR, "provider_scores.json")
-DOWNLOAD_LOG = os.path.join(DATA_DIR, "download.log")
-APP_LOG = os.path.join(DATA_DIR, "app.log")
+def get_data_dir() -> str:
+    if platform.system() == "Windows":
+        return os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local")), "CinemaCLI")
+    elif platform.system() == "Darwin":
+        return os.path.expanduser("~/Library/Application Support/CinemaCLI")
+    else:
+        return os.path.expanduser("~/.local/share/cinema-cli")
+
+# Storage Files
+DATA_DIR = get_data_dir()
+
+CONFIG_DIR = os.path.join(DATA_DIR, "config")
+STATE_DIR = os.path.join(DATA_DIR, "data")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
+LOGS_DIR = os.path.join(DATA_DIR, "logs")
+
+for _dir in [CONFIG_DIR, STATE_DIR, CACHE_DIR, LOGS_DIR]:
+    os.makedirs(_dir, exist_ok=True)
+
+HISTORY_FILE = os.path.join(STATE_DIR, "history.json")
+FAVORITES_FILE = os.path.join(STATE_DIR, "favorites.json")
+PLAYBACK_FILE = os.path.join(STATE_DIR, "playback.json")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+WATCH_LATER_FILE = os.path.join(STATE_DIR, "watch_later.json")
+PROVIDER_SCORES_FILE = os.path.join(CACHE_DIR, "provider_scores.json")
+DOWNLOAD_LOG = os.path.join(LOGS_DIR, "download.log")
+APP_LOG = os.path.join(LOGS_DIR, "app.log")
 
 # ── Legacy paths – migrate data from old files if they exist ──────────────────
 _LEGACY = {

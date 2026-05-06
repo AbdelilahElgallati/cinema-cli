@@ -78,6 +78,10 @@ class AppController:
             print(f"Cinema CLI v{APP_VERSION}")
             return True
 
+        if argv and argv[0] == "--diagnostics":
+            self._run_diagnostics()
+            return True
+
         if argv and argv[0] in ("--help", "-h"):
             print(
                 "Cinema CLI — a terminal-based movie & TV streaming client\n"
@@ -114,3 +118,64 @@ class AppController:
             return True
 
         return False
+
+    def _run_diagnostics(self):
+        import os
+        import platform
+        import urllib.request
+        from src.utils.system_tools import is_tool_available, get_tool_version
+        from src.config import DATA_DIR, SETTINGS_FILE, BACKEND_URL
+        from src.utils.storage import load_json_data
+
+        print("="*50)
+        print(" CINEMA CLI — SYSTEM DIAGNOSTICS")
+        print("="*50)
+        
+        print(f"OS: {platform.system()} {platform.release()} ({platform.architecture()[0]})")
+        print(f"Data Dir: {DATA_DIR}")
+        print(f"Settings File: {SETTINGS_FILE}")
+        
+        print("\n[1/4] Checking External Tools...")
+        tools = ['node', 'npm', 'mpv', 'ffmpeg', 'yt-dlp', 'aria2c']
+        for t in tools:
+            found = is_tool_available(t)
+            status = "PASS" if found else "FAIL"
+            print(f"  [{status}] {t}")
+            
+        print("\n[2/4] Checking Python/Node Configuration...")
+        import sys
+        print(f"  [INFO] Python Executable: {sys.executable}")
+        print(f"  [INFO] Python Version: {sys.version.split(' ')[0]}")
+        
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "backend"))
+        nm_dir = os.path.join(backend_dir, "node_modules")
+        if os.path.exists(nm_dir):
+            print("  [PASS] node_modules directory exists")
+        else:
+            print("  [FAIL] node_modules directory missing. Run 'npm install' in backend/")
+            
+        print("\n[3/4] Checking Persistence & Config...")
+        if os.path.exists(DATA_DIR):
+            print("  [PASS] Data directory exists and is writable")
+        else:
+            print("  [FAIL] Data directory is missing")
+            
+        settings = load_json_data(SETTINGS_FILE, default={}, expected_type=dict)
+        print(f"  [INFO] Loaded Settings Keys: {list(settings.keys())}")
+        
+        print("\n[4/4] Checking Backend Reachability...")
+        backend_url = settings.get("backend", os.getenv("BACKEND_URL", BACKEND_URL))
+        print(f"  [INFO] Target Backend URL: {backend_url}")
+        
+        try:
+            req = urllib.request.Request(f"{backend_url.rstrip('/')}/health")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if 200 <= resp.status < 400:
+                    print("  [PASS] Backend responded to /health")
+                else:
+                    print(f"  [FAIL] Backend responded with status {resp.status}")
+        except Exception as e:
+            print(f"  [FAIL] Backend unreachable: {e}")
+            print("         If the app is not running, this is expected.")
+            
+        print("\nDiagnostics complete.")

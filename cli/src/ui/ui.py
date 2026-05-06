@@ -16,6 +16,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout as PTLayout
 from prompt_toolkit.layout import VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
 from rich import box
 from rich.align import Align
@@ -335,12 +336,19 @@ def format_item(item):
 
 # ─── Help bar strings ──────────────────────────────────────────────────────────
 
-_HELP_BROWSE = (
-    "  ↑↓ Navigate   Enter Select   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
-)
+_HELP_BROWSE_BASE = "  ↑↓ Navigate   Enter Select"
 _HELP_SELECT = "  ↑↓ Navigate   Enter Confirm   B/Q Cancel  "
 _HELP_MULTI = "  ↑↓ Navigate   Space Toggle   A All/None   Enter Confirm   B/Q Cancel  "
-_HELP_BROWSE_JUMP = "  ↑↓ Navigate   Enter Select   J Jump   F Favourite   W Watch Later   D Batch DL   B Back   Q Quit  "
+
+
+def _build_browse_help(allow_jump=False, delete_label: str | None = None) -> str:
+    parts = [_HELP_BROWSE_BASE]
+    if delete_label:
+        parts.append(f"X {delete_label}")
+    if allow_jump:
+        parts.append("J Jump")
+    parts.extend(["F Favourite", "W Watch Later", "D Batch DL", "B/Esc Back", "Q Quit"])
+    return "  " + "   ".join(parts) + "  "
 
 
 # ─── Selection menu ────────────────────────────────────────────────────────────
@@ -353,6 +361,8 @@ def selection_menu(  # NOSONAR
     formatter=None,
     default_index=0,
     allow_jump=False,
+    delete_label=None,
+    header_hint=None,
 ):
     """Interactive arrow-key selection menu.
 
@@ -375,43 +385,57 @@ def selection_menu(  # NOSONAR
     def _up(event):
         nonlocal selected_index
         selected_index = (selected_index - 1) % len(items)
+        event.app.invalidate()
 
     @kb.add("j")
     @kb.add("down")
     def _down(event):
         nonlocal selected_index
         selected_index = (selected_index + 1) % len(items)
+        event.app.invalidate()
 
     @kb.add("pageup")
     def _pageup(event):
         nonlocal selected_index
         selected_index = max(0, selected_index - 10)
+        event.app.invalidate()
 
     @kb.add("pagedown")
     def _pagedown(event):
         nonlocal selected_index
         selected_index = min(len(items) - 1, selected_index + 10)
+        event.app.invalidate()
 
     @kb.add("home")
     @kb.add("g")
     def _top(event):
         nonlocal selected_index
         selected_index = 0
+        event.app.invalidate()
 
     @kb.add("end")
     @kb.add("G")
     def _bottom(event):
         nonlocal selected_index
         selected_index = len(items) - 1
+        event.app.invalidate()
 
     @kb.add("enter")
+    @kb.add("c-m")
+    @kb.add("c-j")
     def _enter(event):
+        current = selected_index
         result["action"] = "select"
-        result["value"] = items[selected_index]
+        result["value"] = items[current]
         event.app.exit()
 
     @kb.add("b")
     def _back(event):
+        result["action"] = "back"
+        event.app.exit()
+
+    @kb.add("escape")
+    def _esc(event):
         result["action"] = "back"
         event.app.exit()
 
@@ -437,6 +461,13 @@ def selection_menu(  # NOSONAR
         result["action"] = "batch"
         event.app.exit()
 
+    @kb.add("x")
+    def _delete(event):
+        if delete_label:
+            result["action"] = "delete"
+            result["value"] = items[selected_index]
+            event.app.exit()
+
     @kb.add("J")
     def _jump(event):
         if allow_jump:
@@ -448,6 +479,8 @@ def selection_menu(  # NOSONAR
         res = []
         res.append(("class:header", f"  ╭── {title} ──╮\n"))
         res.append((_CLASS_BORDER, "  " + "─" * 64 + "\n"))
+        if header_hint:
+            res.append(("class:dim", f"  {header_hint}\n\n"))
 
         visible_start = max(0, selected_index - 12)
         visible_end = min(len(items), visible_start + 25)
@@ -460,17 +493,30 @@ def selection_menu(  # NOSONAR
             raw = formatter(item) if formatter else format_item(item)
             disp = _strip_rich(raw)
 
+            def _make_click_handler(index):
+                def _on_click(event):
+                    if (
+                        event.event_type == MouseEventType.MOUSE_UP
+                        and event.button == MouseButton.LEFT
+                    ):
+                        result["action"] = "select"
+                        result["value"] = items[index]
+                        event.app.exit()
+
+                return _on_click
+
+            click_handler = _make_click_handler(i)
             if i == selected_index:
-                res.append(("class:selected", f"  ▶  {disp}\n"))
+                res.append(("class:selected", f"  ▶  {disp}\n", click_handler))
             else:
-                res.append(("class:item", f"     {disp}\n"))
+                res.append(("class:item", f"     {disp}\n", click_handler))
 
         remaining = len(items) - visible_end
         if remaining > 0:
             res.append((_CLASS_DIM, f"  ↓ {remaining} more below\n"))
 
         res.append((_CLASS_BORDER, "\n  " + "─" * 64 + "\n"))
-        res.append(("class:help", _HELP_BROWSE_JUMP if allow_jump else _HELP_BROWSE))
+        res.append(("class:help", _build_browse_help(allow_jump, delete_label)))
         return res
 
     def get_details_text():
@@ -521,16 +567,28 @@ def selection_menu(  # NOSONAR
         }
     )
 
+    list_control = FormattedTextControl(get_formatted_text, focusable=True)
+    list_window = Window(content=list_control, width=68)
+    details_window = Window(content=FormattedTextControl(get_details_text))
     body = VSplit(
         [
-            Window(content=FormattedTextControl(get_formatted_text), width=68),
-            Window(content=FormattedTextControl(get_details_text)),
+            list_window,
+            details_window,
         ],
         padding=2,
     )
 
-    app = Application(layout=PTLayout(body), key_bindings=kb, style=style, full_screen=False)
+    app = Application(
+        layout=PTLayout(body, focused_element=list_window),
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+        mouse_support=True,
+    )
     app.run()
+    if result["action"] is None and items:
+        result["action"] = "select"
+        result["value"] = items[selected_index]
     return result
 
 
@@ -606,6 +664,7 @@ def multi_selection_menu(items, title, formatter=None):  # NOSONAR
 
     @kb.add("b")
     @kb.add("q")
+    @kb.add("escape")
     def _cancel(event):
         event.app.exit(result=[])
 
@@ -628,10 +687,27 @@ def multi_selection_menu(items, title, formatter=None):  # NOSONAR
             checkbox = " [✓]" if i in checked_indices else " [ ]"
             cursor = "▶ " if i == selected_index else "  "
 
+            def _make_click_handler(index):
+                def _on_click(event):
+                    nonlocal selected_index
+                    if (
+                        event.event_type == MouseEventType.MOUSE_UP
+                        and event.button == MouseButton.LEFT
+                    ):
+                        selected_index = index
+                        if index in checked_indices:
+                            checked_indices.remove(index)
+                        else:
+                            checked_indices.add(index)
+
+                return _on_click
+
+            click_handler = _make_click_handler(i)
+
             if i == selected_index:
-                res.append(("class:selected", f"  {cursor}{checkbox}  {disp}\n"))
+                res.append(("class:selected", f"  {cursor}{checkbox}  {disp}\n", click_handler))
             else:
-                res.append(("class:item", f"  {cursor}{checkbox}  {disp}\n"))
+                res.append(("class:item", f"  {cursor}{checkbox}  {disp}\n", click_handler))
 
         remaining = len(items) - visible_end
         if remaining > 0:
@@ -658,5 +734,63 @@ def multi_selection_menu(items, title, formatter=None):  # NOSONAR
         key_bindings=kb,
         style=style,
         full_screen=False,
+        mouse_support=True,
     )
     return app.run() or []
+
+
+def confirm_delete_dialog(name: str) -> bool:
+    """Keyboard-navigable delete confirmation dialog."""
+    result = {"confirm": False}
+    prompt = f"Delete {name}? This will remove all files from disk. [Y] Yes  [N] No"
+
+    kb = KeyBindings()
+
+    @kb.add("y")
+    @kb.add("Y")
+    def _yes(event):
+        result["confirm"] = True
+        event.app.exit()
+
+    @kb.add("n")
+    @kb.add("N")
+    def _no(event):
+        result["confirm"] = False
+        event.app.exit()
+
+    @kb.add("enter")
+    @kb.add("c-m")
+    @kb.add("c-j")
+    def _enter(event):
+        result["confirm"] = True
+        event.app.exit()
+
+    @kb.add("escape")
+    @kb.add("q")
+    def _esc(event):
+        result["confirm"] = False
+        event.app.exit()
+
+    style = Style.from_dict(
+        {
+            "header": f"bold {PRIMARY}",
+            "msg": f"{TEXT}",
+            "help": f"italic dim {TEXT}",
+        }
+    )
+
+    def _text():
+        return [
+            ("class:header", "  ╭── Confirm Delete ──╮\n"),
+            ("class:msg", f"  {prompt}\n"),
+            ("class:help", "  [Enter/Y]=Yes   [Esc/N]=No\n"),
+        ]
+
+    app: Application = Application(
+        layout=PTLayout(Window(FormattedTextControl(_text))),
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+    app.run()
+    return result["confirm"]

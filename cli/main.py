@@ -109,12 +109,14 @@ def _enable_debug_mode():
     _emit_unified_log("UI", "Debug mode enabled")
 
 
-def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
+import shutil
+from src.utils.system_tools import find_executable
+
+def start_local_backend(backend_url: str, timeout: int = 60):  # NOSONAR
     """Start local backend if backend_url points at localhost and wait until it's healthy.
 
     Returns subprocess.Process or None.
     """
-
     def _probe_urls(base_url: str):
         base = str(base_url or "").rstrip("/")
         return [f"{base}/", f"{base}/health", f"{base}/proxy/status"]
@@ -129,40 +131,89 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
                 with urlopen(req, timeout=2) as resp:
                     if 200 <= int(getattr(resp, "status", 0)) < 400:
                         return True
-            except Exception as e:
-                app_logger.debug(f"Suppressed error in _is_running: {e}", exc_info=True)
+            except Exception:
                 continue
         return False
 
-    def _find_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            sock.listen(1)
-            return int(sock.getsockname()[1])
-
     try:
-        host = backend_url.split("://")[-1].split(":")[0]
+        parsed = urlparse(backend_url or "http://localhost:3010")
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 3010
+        launch_scheme = parsed.scheme or "http"
     except Exception:
-        host = ""
+        host = "127.0.0.1"
+        port = 3010
+        launch_scheme = "http"
 
     if host not in ("localhost", "127.0.0.1", ""):
         return None
 
-    # If already running, nothing to do
-    if _is_running(backend_url):
+    launch_url = f"{launch_scheme}://{host}:{port}"
+
+    if _is_running(launch_url):
         return None
 
-    def _backend_launch_env(port: int):
-        env = os.environ.copy()
-        env["PORT"] = str(port)
-        return env
+    # Check if something else is using the port by trying to bind
+    port_in_use = False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            port_in_use = True
+
+    if port_in_use:
+        # Prompt user for a new port since it's taken by a non-cinema app
+        console.print(f"[bold red]Port {port} is in use by another application.[/bold red]")
+        while True:
+            new_port_str = console.input("[bold cyan]Please enter a new port (e.g. 3011): [/bold cyan]").strip()
+            try:
+                new_port = int(new_port_str)
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("127.0.0.1", new_port))
+                port = new_port
+                launch_url = f"{launch_scheme}://{host}:{port}"
+                
+                # Persist the new stable port
+                from src.config import SETTINGS_FILE
+                from src.utils.storage import load_json_data, save_json_data
+                st = load_json_data(SETTINGS_FILE, default={}, expected_type=dict)
+                st["backend"] = launch_url
+                save_json_data(SETTINGS_FILE, st)
+                break
+            except OSError:
+                console.print(f"[bold red]Port {new_port_str} is also in use or invalid. Try again.[/bold red]")
+            except ValueError:
+                pass
 
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
     log_path = os.path.join(backend_dir, "backend.log")
 
-    show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
+    # Check dependencies
+    node_path = find_executable("node")
+    npm_path = find_executable("npm")
+    
+    if not node_path or not npm_path:
+        console.print("[bold red]Node.js or npm not found. Please install Node.js 18+.[/bold red]")
+        return None
 
-    # Ensure log directory exists and open log file for append
+    node_modules_dir = os.path.join(backend_dir, "node_modules")
+    if not os.path.isdir(node_modules_dir):
+        with console.status("Installing backend dependencies (this may take a minute)...", spinner="dots"):
+            npm_cmd = [npm_path, "install", "--silent"]
+            try:
+                subprocess.run(npm_cmd, cwd=backend_dir, shell=(os.name == "nt"), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                console.print(f"[bold red]Failed to install backend dependencies: {e}[/bold red]")
+                return None
+
+    def _backend_launch_env(p: int):
+        env = os.environ.copy()
+        env["PORT"] = str(p)
+        return env
+
+    launch_env = _backend_launch_env(port)
+
+    show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
     logfile = None
     if not DEBUG_MODE:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -174,75 +225,64 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
         stdout = subprocess.PIPE
         stderr = subprocess.PIPE
         popen_extra = {"text": True, "bufsize": 1}
-    parsed_backend_url = urlparse(backend_url or "http://localhost:3010")
-    launch_host = parsed_backend_url.hostname or "localhost"
-    launch_scheme = parsed_backend_url.scheme or "http"
-    launch_port = _find_free_port()
-    launch_url = f"{launch_scheme}://{launch_host}:{launch_port}"
-    launch_env = _backend_launch_env(launch_port)
 
-    npm_command = ["npm.cmd", "start"] if os.name == "nt" else ["npm", "start"]
     proc = None
     try:
         proc = subprocess.Popen(
-            npm_command,
+            [npm_path, "start"],
             cwd=backend_dir,
             stdout=stdout,
             stderr=stderr,
             env=launch_env,
+            shell=(os.name == "nt"),
             **popen_extra,
         )
         _attach_backend_debug_streams(proc)
-    except Exception:
+    except Exception as e:
         try:
             proc = subprocess.Popen(
-                ["node", "index.js"],
+                [node_path, "index.js"],
                 cwd=backend_dir,
                 stdout=stdout,
                 stderr=stderr,
                 env=launch_env,
+                shell=(os.name == "nt"),
                 **popen_extra,
             )
             _attach_backend_debug_streams(proc)
-        except Exception:
+        except Exception as e2:
+            console.print(f"[bold red]Failed to start backend: {e2}[/bold red]")
             if logfile:
                 logfile.close()
             return None
 
-    # Optionally tail live logs to console while waiting
     stop_tailer = None
-    tail_thread = None
     if show_logs and not DEBUG_MODE:
         stop_tailer = threading.Event()
-
         def _tail_file(path, stop_event):
             try:
                 with open(path, encoding="utf-8", errors="ignore") as f:
-                    # Seek to near end
                     f.seek(0, os.SEEK_END)
                     while not stop_event.is_set():
                         line = f.readline()
                         if line:
                             try:
                                 console.print(line.rstrip())
-                            except Exception as e:
-                                app_logger.debug(
-                                    f"Suppressed error in _tail_file print: {e}", exc_info=True
-                                )
+                            except Exception:
+                                pass
                         else:
                             time.sleep(0.2)
-            except Exception as e:
-                app_logger.debug(f"Suppressed error in _tail_file: {e}", exc_info=True)
-                return
+            except Exception:
+                pass
+        threading.Thread(target=_tail_file, args=(log_path, stop_tailer), daemon=True).start()
 
-        tail_thread = threading.Thread(target=_tail_file, args=(log_path, stop_tailer), daemon=True)
-        tail_thread.start()
-
-    # Wait until healthy or timeout while showing a friendly status
     with console.status("Starting backend, please wait...", spinner="dots"):
         waited = 0.0
         interval = 0.5
-        while waited < 60:
+        while waited < timeout:
+            if proc.poll() is not None:
+                console.print(f"[bold red]Backend process crashed early with code {proc.returncode}[/bold red]")
+                break
             if _is_running(launch_url):
                 os.environ["BACKEND_URL"] = launch_url
                 if stop_tailer:
@@ -254,13 +294,16 @@ def start_local_backend(backend_url: str, timeout: int = 30):  # NOSONAR
             time.sleep(interval)
             waited += interval
 
-    # Timeout reached; stop tailer if running and return proc (logs available in backend.log)
     if stop_tailer:
         stop_tailer.set()
     if logfile:
         logfile.flush()
         logfile.close()
+        
+    console.print(f"[bold red]Backend failed to become healthy at {launch_url}.[/bold red]")
+    console.print("[dim]Check logs/backend.log for details.[/dim]")
     return proc
+
 
 
 from prompt_toolkit import Application
@@ -317,6 +360,7 @@ from src.controllers.app_controller import AppController
 from src.state.app_state import AppState
 from src.ui.ui import (
     clear,
+    confirm_delete_dialog,
     multi_selection_menu,
     print_header,
     selection_menu,
@@ -942,6 +986,13 @@ class CinemaCLI:
         self.playback = load_json_data(PLAYBACK_FILE) or {}
         self.watch_later = load_json_data(WATCH_LATER_FILE) or []
         self.episode_positions = {}
+        self.library_nav_state = {
+            "home_index": 0,
+            "movie_index": 0,
+            "show_index": 0,
+            "season_index": {},
+            "episode_index": {},
+        }
 
         os.makedirs(self.settings["library_dir"], exist_ok=True)
         self.download_manager = DownloadManager(
@@ -1026,95 +1077,8 @@ class CinemaCLI:
         return False
 
     def _maybe_start_backend(self, backend_url: str) -> None:  # NOSONAR
-        # Only auto-start when pointing to localhost and not already running
-        try:
-            host = backend_url.split("://")[-1].split(":")[0]
-        except Exception:
-            host = ""
-
-        if host not in ("localhost", "127.0.0.1", ""):
-            return
-
-        if self._is_backend_running(backend_url):
-            return
-
-        def _find_free_port() -> int:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                sock.listen(1)
-                return int(sock.getsockname()[1])
-
-        def _backend_launch_env(port: int):
-            env = os.environ.copy()
-            env["PORT"] = str(port)
-            return env
-
-        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
-        # Try to start via npm start; fallback to node index.js if npm not available
-        try:
-            # Allow showing backend logs when requested via env var
-            show_logs = os.getenv("AUTO_START_BACKEND_SHOW_LOGS") == "1"
-            if DEBUG_MODE:
-                stdout = subprocess.PIPE
-                stderr = subprocess.PIPE
-                popen_extra = {"text": True, "bufsize": 1}
-            else:
-                stdout = None if show_logs else subprocess.DEVNULL
-                stderr = None if show_logs else subprocess.DEVNULL
-                popen_extra = {}
-            parsed_backend_url = urlparse(backend_url or "http://localhost:3010")
-            launch_host = parsed_backend_url.hostname or "localhost"
-            launch_scheme = parsed_backend_url.scheme or "http"
-            launch_port = _find_free_port()
-            launch_url = f"{launch_scheme}://{launch_host}:{launch_port}"
-            launch_env = _backend_launch_env(launch_port)
-            npm_command = ["npm.cmd", "start"] if os.name == "nt" else ["npm", "start"]
-
-            self._backend_proc = subprocess.Popen(
-                npm_command,
-                cwd=backend_dir,
-                stdout=stdout,
-                stderr=stderr,
-                env=launch_env,
-                **popen_extra,
-            )
-            _attach_backend_debug_streams(self._backend_proc)
-            # Wait briefly for server to come up
-            for _ in range(30):
-                if self._is_backend_running(launch_url):
-                    self.settings["backend"] = launch_url
-                    os.environ["BACKEND_URL"] = launch_url
-                    try:
-                        save_json_data(SETTINGS_FILE, self.settings)
-                    except Exception:
-                        pass
-                    return
-                time.sleep(0.5)
-        except Exception:
-            try:
-                self._backend_proc = subprocess.Popen(
-                    ["node", "index.js"],
-                    cwd=backend_dir,
-                    stdout=stdout,
-                    stderr=stderr,
-                    env=launch_env,
-                    **popen_extra,
-                )
-                _attach_backend_debug_streams(self._backend_proc)
-                for _ in range(10):
-                    if self._is_backend_running(launch_url):
-                        self.settings["backend"] = launch_url
-                        os.environ["BACKEND_URL"] = launch_url
-                        try:
-                            save_json_data(SETTINGS_FILE, self.settings)
-                        except Exception:
-                            pass
-                        return
-                    time.sleep(0.5)
-            except Exception:
-                # If starting fails, leave user to start backend manually
-                return
-
+        self._backend_proc = start_local_backend(backend_url, timeout=60)
+        
     def _cleanup_backend(self):
         if self._backend_proc and self._backend_proc.poll() is None:
             try:
@@ -1224,21 +1188,25 @@ class CinemaCLI:
             selected_index = 0
             kb = KeyBindings()
 
+            @kb.add("enter")
+            @kb.add("c-m")
+            @kb.add("c-j")
+            def _(event, opts=options):  # NOSONAR
+                event.app.exit(result=opts[selected_index]["action"])  # NOSONAR
+
             @kb.add("k")
             @kb.add("up")
             def _(event, opts=options):  # NOSONAR
                 nonlocal selected_index
                 selected_index = (selected_index - 1) % len(opts)
+                event.app.invalidate()
 
             @kb.add("j")
             @kb.add("down")
             def _(event, opts=options):  # NOSONAR
                 nonlocal selected_index
                 selected_index = (selected_index + 1) % len(opts)
-
-            @kb.add("enter")
-            def _(event, opts=options):  # NOSONAR
-                event.app.exit(result=opts[selected_index]["action"])  # NOSONAR
+                event.app.invalidate()
 
             @kb.add("q")
             def _(event):
@@ -1268,11 +1236,13 @@ class CinemaCLI:
                 }
             )
 
+            menu_control = FormattedTextControl(get_menu_text, focusable=True)
             app = Application(
-                layout=PTLayout(Window(FormattedTextControl(get_menu_text))),
+                layout=PTLayout(Window(menu_control), focused_element=menu_control),
                 key_bindings=kb,
                 style=style,
                 full_screen=False,  # Persistent dashboard above
+                mouse_support=True,
             )
             action = app.run()
             if action:
@@ -3346,6 +3316,26 @@ class CinemaCLI:
         else:
             return
 
+    def _library_stats(self, data):
+        movies = data.get("movies", [])
+        tv = data.get("tv", {})
+        episode_count = sum(len(eps) for seasons in tv.values() for eps in seasons.values())
+        movie_size = sum(int(m.get("size", 0) or 0) for m in movies)
+        tv_size = sum(
+            int(ep.get("size", 0) or 0)
+            for seasons in tv.values()
+            for eps in seasons.values()
+            for ep in eps
+        )
+        return {
+            "movies": len(movies),
+            "shows": len(tv),
+            "episodes": episode_count,
+            "movie_size": movie_size,
+            "tv_size": tv_size,
+            "total_size": movie_size + tv_size,
+        }
+
     def handle_local_library(self):
         lib_path = self.settings.get("library_dir")
         if not os.path.exists(lib_path):
@@ -3353,40 +3343,85 @@ class CinemaCLI:
             time.sleep(2)
             return
 
+        force_rescan = False
+        home_index = int(self.library_nav_state.get("home_index", 0) or 0)
         while True:
             clear()
             print_header("Local Library")
             console.print(f"[dim]Library Path: {lib_path}[/dim]\n")
 
             with console.status("Scanning local library...", spinner="dots"):
-                data = scan_library(lib_path, include_details=False)
+                data = scan_library(lib_path, include_details=False, use_cache=not force_rescan)
+            force_rescan = False
+
+            stats = self._library_stats(data)
+            summary = Table(box=box.SIMPLE, show_header=False, padding=(0, 2), expand=False)
+            summary.add_column("k", style=f"bold {PRIMARY}", no_wrap=True)
+            summary.add_column("v", style=f"{TEXT}")
+            summary.add_row("🎬 Movies", str(stats["movies"]))
+            summary.add_row("📺 TV Shows", str(stats["shows"]))
+            summary.add_row("📼 Episodes", str(stats["episodes"]))
+            summary.add_row("💽 Movie Size", format_size(stats["movie_size"]))
+            summary.add_row("💽 TV Size", format_size(stats["tv_size"]))
+            summary.add_row("📦 Total", format_size(stats["total_size"]))
+            console.print(
+                Panel(
+                    summary,
+                    title="Library Summary",
+                    border_style=f"dim {PRIMARY}",
+                    box=box.HEAVY,
+                    padding=(0, 1),
+                )
+            )
+            console.print("")
 
             options = []
-            if data["movies"]:
+            if stats["movies"]:
                 options.append(
-                    {"name": f"🎬 Movies ({len(data['movies'])})", "type": "movies_root"}
+                    {"name": f"🎬 Browse Movies ({stats['movies']})", "type": "movies_root"}
                 )
-            if data["tv"]:
-                options.append({"name": f"📺 TV Shows ({len(data['tv'])})", "type": "tv_root"})
+            if stats["shows"]:
+                options.append({"name": f"📺 Browse TV Shows ({stats['shows']})", "type": "tv_root"})
+            options.append({"name": "🔄 Rescan Library", "type": "rescan"})
+            options.append({"name": "⬅  Back", "type": "back"})
 
-            if not options:
+            if stats["movies"] == 0 and stats["shows"] == 0:
                 console.print("[yellow]Library is empty.[/yellow]")
-                time.sleep(2)
-                break
+                options = [
+                    {"name": "🔄 Rescan Library", "type": "rescan"},
+                    {"name": "⬅  Back", "type": "back"},
+                ]
 
             sel = selection_menu(
-                options, "Browse Offline Media", show_details=False, formatter=lambda x: x["name"]
+                options,
+                "Browse Offline Media",
+                show_details=False,
+                formatter=lambda x: x["name"],
+                default_index=home_index,
             )
-            if not sel or sel["action"] == "back":
+            if (
+                not sel
+                or sel["action"] == "back"
+                or (sel.get("value") or {}).get("type") == "back"
+            ):
+                self.library_nav_state["home_index"] = home_index
                 break
 
             v = sel["value"]
+            home_index = options.index(v)
+            self.library_nav_state["home_index"] = home_index
             if v["type"] == "movies_root":
                 self.handle_library_movies(data["movies"])
             elif v["type"] == "tv_root":
                 self.handle_library_tv(data["tv"])
+            elif v["type"] == "rescan":
+                clear_library_cache(lib_path)
+                force_rescan = True
 
-    def _confirm_delete(self, prompt_text: str) -> bool:
+    def _confirm_delete(self, target_name: str) -> bool:
+        return confirm_delete_dialog(target_name)
+
+    def _confirm_action(self, prompt_text: str) -> bool:
         ans = console.input(f"[bold red]{prompt_text} (y/N): [/bold red]").strip().lower()
         return ans in ("y", "yes")
 
@@ -3421,17 +3456,48 @@ class CinemaCLI:
             return False
 
     def handle_library_movies(self, movies):  # NOSONAR
+        def _row_with_meta(left: str, right: str, width: int = 44) -> str:
+            left = str(left)
+            if len(left) > width:
+                left = left[: width - 1] + "…"
+            return f"{left:<{width}} {right}"
+
+        selected_movie_index = int(self.library_nav_state.get("movie_index", 0) or 0)
         while True:
+            if not movies:
+                console.print("[yellow]No movies in local library.[/yellow]")
+                time.sleep(1)
+                return
             sel = selection_menu(
                 movies,
-                "Local Movies",
+                "Local Library › Movies",
                 show_details=True,
-                formatter=lambda x: f"{x['title']} ({x.get('year', 'N/A')})",
+                formatter=lambda x: _row_with_meta(
+                    f"{x['title']} ({x.get('year', 'N/A')})",
+                    format_size(int(x.get("size", 0) or 0)),
+                ),
+                default_index=selected_movie_index,
+                delete_label="Delete Movie",
             )
             if not sel or sel["action"] == "back":
+                self.library_nav_state["movie_index"] = selected_movie_index
                 break
 
             movie = sel["value"]
+            selected_movie_index = movies.index(movie)
+            self.library_nav_state["movie_index"] = selected_movie_index
+            if sel["action"] == "delete":
+                if self._confirm_delete(movie["title"]):
+                    deleted = self._delete_media_file(movie.get("path"))
+                    if deleted:
+                        console.print(f"[green]Deleted: {movie['title']}[/green]")
+                        movies = [m for m in movies if m.get("path") != movie.get("path")]
+                        if selected_movie_index >= len(movies):
+                            selected_movie_index = max(0, len(movies) - 1)
+                    else:
+                        console.print("[yellow]Movie file was not found or could not be deleted.[/yellow]")
+                    time.sleep(1)
+                continue
             if sel["action"] == "favorite":
                 self.toggle_favorite(movie)
                 continue
@@ -3441,7 +3507,6 @@ class CinemaCLI:
 
             while True:
                 clear()
-                # Header
                 hdr = Text()
                 hdr.append(CLI_BRAND_TITLE, style=f"bold {PRIMARY}")
                 hdr.append(CLI_SEPARATOR, style=f"dim {PRIMARY}")
@@ -3455,7 +3520,6 @@ class CinemaCLI:
                 if "resolution" not in movie or "subtitles" not in movie:
                     with console.status("Loading media details...", spinner="dots"):
                         movie.update(get_media_details(movie["path"]))
-                # Details table
                 dtbl = Table(box=box.SIMPLE, show_header=False, padding=(0, 2), expand=False)
                 dtbl.add_column("key", style=f"bold {PRIMARY}", no_wrap=True)
                 dtbl.add_column("value", style=f"{TEXT}")
@@ -3472,14 +3536,11 @@ class CinemaCLI:
                     Panel(dtbl, border_style=f"dim {PRIMARY}", box=box.HEAVY, padding=(0, 1))
                 )
                 console.print("")
-                # Action menu
-                action_opts = [
-                    {"name": "▶  Play", "value": "play"},
-                    {"name": "🗑  Delete Movie", "value": "delete"},
-                    {"name": "⬅  Back", "value": "back"},
-                ]
                 act = selection_menu(
-                    action_opts, movie["title"], show_details=False, formatter=lambda x: x["name"]
+                    [{"name": "▶ Play", "value": "play"}, {"name": "← Back", "value": "back"}],
+                    f"Local Library › {movie['title']}",
+                    show_details=False,
+                    formatter=lambda x: x["name"],
                 )
                 if (
                     not act
@@ -3493,105 +3554,158 @@ class CinemaCLI:
                         movie["title"],
                         player=self.settings.get("preferred_player", "mpv"),
                     )
-                elif (act.get("value") or {}).get("value") == "delete":
-                    if self._confirm_delete(f"Delete movie '{movie['title']}'"):
-                        deleted = self._delete_media_file(movie.get("path"))
-                        if deleted:
-                            console.print(f"[green]Deleted: {movie['title']}[/green]")
-                            time.sleep(1)
-                            return
-                        console.print(
-                            "[yellow]Movie file was not found or could not be deleted.[/yellow]"
-                        )
-                        time.sleep(1)
 
     def handle_library_tv(self, tv_data):  # NOSONAR
+        def _row_with_meta(left: str, right: str, width: int = 38) -> str:
+            left = str(left)
+            if len(left) > width:
+                left = left[: width - 1] + "…"
+            return f"{left:<{width}} {right}"
+
+        selected_show_index = int(self.library_nav_state.get("show_index", 0) or 0)
+        season_indices = self.library_nav_state.get("season_index", {})
+        episode_indices = self.library_nav_state.get("episode_index", {})
         while True:
             shows = [{"title": s, "seasons": d} for s, d in tv_data.items()]
+            if not shows:
+                console.print("[yellow]No TV shows in local library.[/yellow]")
+                time.sleep(1)
+                return
+
+            total_episodes = sum(len(eps) for s in shows for eps in s["seasons"].values())
+            total_size = sum(
+                int(ep.get("size", 0) or 0)
+                for s in shows
+                for eps in s["seasons"].values()
+                for ep in eps
+            )
+
+            def _show_fmt(show_item):
+                season_count = len(show_item["seasons"])
+                episode_count = sum(len(eps) for eps in show_item["seasons"].values())
+                show_size = sum(
+                    int(ep.get("size", 0) or 0) for eps in show_item["seasons"].values() for ep in eps
+                )
+                chips = f"S{season_count}  •  {episode_count} eps  •  {format_size(show_size)}"
+                return _row_with_meta(show_item["title"], chips)
+
             sel = selection_menu(
-                shows, "Local TV Shows", show_details=False, formatter=lambda x: x["title"]
+                shows,
+                "Local Library › TV Shows",
+                show_details=False,
+                formatter=_show_fmt,
+                default_index=selected_show_index,
+                delete_label="Delete Show",
+                header_hint=f"{len(shows)} shows  •  {total_episodes} episodes  •  {format_size(total_size)}",
             )
             if not sel or sel["action"] == "back":
+                self.library_nav_state["show_index"] = selected_show_index
+                self.library_nav_state["season_index"] = season_indices
+                self.library_nav_state["episode_index"] = episode_indices
                 break
 
             show = sel["value"]
+            selected_show_index = shows.index(show)
+            self.library_nav_state["show_index"] = selected_show_index
+            show_key = show["title"]
+
+            if sel["action"] == "delete":
+                if self._confirm_delete(show["title"]):
+                    deleted_count = 0
+                    for eps in show["seasons"].values():
+                        for ep_item in eps:
+                            if self._delete_media_file(ep_item.get("path")):
+                                deleted_count += 1
+                    console.print(f"[green]Deleted {deleted_count} episode file(s) from {show['title']}.[/green]")
+                    tv_data.pop(show_key, None)
+                    if selected_show_index >= len(tv_data):
+                        selected_show_index = max(0, len(tv_data) - 1)
+                    time.sleep(1)
+                continue
+
             while True:
                 seasons = [{"num": sn, "eps": eps} for sn, eps in show["seasons"].items()]
                 seasons.sort(key=lambda x: x["num"])
-                season_options = [{"num": -1, "eps": [], "delete_show": True}]
-                season_options.extend(seasons)
+                if not seasons:
+                    break
 
                 def _season_fmt(x):
-                    if x.get("delete_show"):
-                        return "🗑  Delete Entire TV Show"
-                    return f"Season {x['num']} ({len(x['eps'])} Episodes)"
+                    season_size = sum(int(ep.get("size", 0) or 0) for ep in x["eps"])
+                    return _row_with_meta(
+                        f"Season {x['num']}",
+                        f"{len(x['eps'])} episodes  •  {format_size(season_size)}",
+                    )
 
                 s_sel = selection_menu(
-                    season_options,
-                    f"{show['title']} - Seasons",
+                    seasons,
+                    f"{show['title']} › Seasons",
                     show_details=False,
                     formatter=_season_fmt,
+                    default_index=int(season_indices.get(show_key, 0) or 0),
+                    delete_label="Delete Season",
                 )
                 if not s_sel or s_sel["action"] == "back":
                     break
 
                 season = s_sel["value"]
-                if season.get("delete_show"):
-                    if self._confirm_delete(f"Delete entire show '{show['title']}'"):
+                season_indices[show_key] = seasons.index(season)
+                if s_sel["action"] == "delete":
+                    target_name = f"{show['title']} Season {season['num']}"
+                    if self._confirm_delete(target_name):
                         deleted_count = 0
-                        for _, eps in show["seasons"].items():
-                            for ep_item in eps:
-                                if self._delete_media_file(ep_item.get("path")):
-                                    deleted_count += 1
+                        for ep_item in season["eps"]:
+                            if self._delete_media_file(ep_item.get("path")):
+                                deleted_count += 1
                         console.print(
-                            f"[green]Deleted {deleted_count} episode file(s) from {show['title']}.[/green]"
+                            f"[green]Deleted {deleted_count} episode file(s) from season {season['num']}.[/green]"
                         )
+                        show["seasons"].pop(season["num"], None)
                         time.sleep(1)
-                        return
                     continue
 
                 while True:
-                    episode_options = [
-                        {
-                            "episode": -1,
-                            "filename": "Delete This Season",
-                            "delete_season": True,
-                            "path": "",
-                        }
-                    ]
-                    episode_options.extend(season["eps"])
+                    episode_key = f"{show_key}-s{season['num']}"
+                    episodes = list(season["eps"])
+                    if not episodes:
+                        break
 
                     def _episode_fmt(x):
-                        if x.get("delete_season"):
-                            return "🗑  Delete Entire Season"
-                        return f"E{x['episode']} - {x['filename']}"
+                        ep_no = x.get("episode")
+                        ep_label = f"E{int(ep_no):02d}" if isinstance(ep_no, int) else "E?"
+                        return _row_with_meta(
+                            f"{ep_label}  •  {show['title']}",
+                            f"{format_size(int(x.get('size', 0) or 0))}  •  local",
+                        )
 
                     e_sel = selection_menu(
-                        episode_options,
-                        f"{show['title']} S{season['num']} Episodes",
+                        episodes,
+                        f"{show['title']} › Season {season['num']} › Episodes",
                         show_details=True,
                         formatter=_episode_fmt,
+                        default_index=int(episode_indices.get(episode_key, 0) or 0),
+                        delete_label="Delete Episode",
                     )
                     if not e_sel or e_sel["action"] == "back":
                         break
 
                     ep = e_sel["value"]
-                    if ep.get("delete_season"):
-                        if self._confirm_delete(
-                            f"Delete season {season['num']} of '{show['title']}'"
-                        ):
-                            deleted_count = 0
-                            for ep_item in season["eps"]:
-                                if self._delete_media_file(ep_item.get("path")):
-                                    deleted_count += 1
-                            console.print(
-                                f"[green]Deleted {deleted_count} episode file(s) from season {season['num']}.[/green]"
-                            )
+                    episode_indices[episode_key] = episodes.index(ep)
+                    if e_sel["action"] == "delete":
+                        ep_name = f"{show['title']} S{season['num']}E{ep['episode']}"
+                        if self._confirm_delete(ep_name):
+                            deleted = self._delete_media_file(ep.get("path"))
+                            if deleted:
+                                console.print(f"[green]Deleted episode {ep_name}[/green]")
+                                season["eps"] = [
+                                    item for item in season["eps"] if item.get("path") != ep.get("path")
+                                ]
+                            else:
+                                console.print(
+                                    "[yellow]Episode file was not found or could not be deleted.[/yellow]"
+                                )
                             time.sleep(1)
-                            break
                         continue
 
-                    # If user chose 'favorite', we handle it (even though it's offline)
                     if e_sel["action"] == "favorite":
                         self.toggle_favorite(ep)
                         continue
@@ -3599,12 +3713,9 @@ class CinemaCLI:
                         self.toggle_watch_later(ep)
                         continue
 
-                    # For selecting, we go to details or play?
-                    # Let's show details AND option to play
                     while True:
                         clear()
-                        ep_label = f"{show['title']} S{season['num']}E{ep['episode']}"
-                        # Header
+                        ep_label = f"{show['title']} › S{season['num']}E{ep['episode']}"
                         hdr2 = Text()
                         hdr2.append(CLI_BRAND_TITLE, style=f"bold {PRIMARY}")
                         hdr2.append(CLI_SEPARATOR, style=f"dim {PRIMARY}")
@@ -3623,10 +3734,7 @@ class CinemaCLI:
                         if "resolution" not in ep or "subtitles" not in ep:
                             with console.status("Loading media details...", spinner="dots"):
                                 ep.update(get_media_details(ep["path"]))
-                        # Details table
-                        etbl = Table(
-                            box=box.SIMPLE, show_header=False, padding=(0, 2), expand=False
-                        )
+                        etbl = Table(box=box.SIMPLE, show_header=False, padding=(0, 2), expand=False)
                         etbl.add_column("key", style=f"bold {PRIMARY}", no_wrap=True)
                         etbl.add_column("value", style=f"{TEXT}")
                         etbl.add_row("📁  File", ep["filename"])
@@ -3635,9 +3743,7 @@ class CinemaCLI:
                         etbl.add_row("🖥  Resolution", ep.get("resolution") or "Unknown")
                         subs = ep.get("subtitles", [])
                         if subs:
-                            etbl.add_row(
-                                "💬  Subtitles", f"[{SUCCESS}]{len(subs)} track(s)[/{SUCCESS}]"
-                            )
+                            etbl.add_row("💬  Subtitles", f"[{SUCCESS}]{len(subs)} track(s)[/{SUCCESS}]")
                             for s in subs:
                                 etbl.add_row("", f"[dim]  • {s}[/dim]")
                         console.print(
@@ -3646,14 +3752,8 @@ class CinemaCLI:
                             )
                         )
                         console.print("")
-                        # Action menu
-                        ep_action_opts = [
-                            {"name": "▶  Play", "value": "play"},
-                            {"name": "🗑  Delete Episode", "value": "delete"},
-                            {"name": "⬅  Back", "value": "back"},
-                        ]
                         ep_act = selection_menu(
-                            ep_action_opts,
+                            [{"name": "▶ Play", "value": "play"}, {"name": "← Back", "value": "back"}],
                             ep_label,
                             show_details=False,
                             formatter=lambda x: x["name"],
@@ -3686,9 +3786,7 @@ class CinemaCLI:
                                 if cur_idx >= 0 and cur_idx < len(season["eps"]) - 1:
                                     post_opts.append({"name": "⏭️  Next Episode", "value": "next"})
                                 if cur_idx > 0:
-                                    post_opts.append(
-                                        {"name": "⏮️  Previous Episode", "value": "prev"}
-                                    )
+                                    post_opts.append({"name": "⏮️  Previous Episode", "value": "prev"})
                                 post_opts.append({"name": "⬅  Go Back to Details", "value": "back"})
 
                                 post_act = selection_menu(
@@ -3707,27 +3805,12 @@ class CinemaCLI:
                                     auto_play = True
                                 elif post_val == "next":
                                     ep = season["eps"][cur_idx + 1]
-                                    ep_label = f"{show['title']} S{season['num']}E{ep['episode']}"
+                                    ep_label = f"{show['title']} › S{season['num']}E{ep['episode']}"
                                     auto_play = True
                                 elif post_val == "prev":
                                     ep = season["eps"][cur_idx - 1]
-                                    ep_label = f"{show['title']} S{season['num']}E{ep['episode']}"
+                                    ep_label = f"{show['title']} › S{season['num']}E{ep['episode']}"
                                     auto_play = True
-                        elif (ep_act.get("value") or {}).get("value") == "delete":
-                            if self._confirm_delete(
-                                f"Delete episode S{season['num']}E{ep['episode']} from '{show['title']}'"
-                            ):
-                                deleted = self._delete_media_file(ep.get("path"))
-                                if deleted:
-                                    console.print(
-                                        f"[green]Deleted episode S{season['num']}E{ep['episode']}[/green]"
-                                    )
-                                    time.sleep(1)
-                                    break
-                                console.print(
-                                    "[yellow]Episode file was not found or could not be deleted.[/yellow]"
-                                )
-                                time.sleep(1)
 
     def handle_download_manager(self):  # NOSONAR
         selected_indices = set()
@@ -3917,7 +4000,8 @@ class CinemaCLI:
                 return
 
             action_opts = [
-                {"name": f"🗑  Remove {len(items)} item(s)", "value": "remove"},
+                {"name": f"🗑  Remove {len(items)} item(s) from list", "value": "remove"},
+                {"name": f"🧹 Delete files + remove {len(items)} item(s)", "value": "delete_and_remove"},
                 {"name": f"🔄 Retry {len(items)} item(s)", "value": "retry"},
                 {"name": "⬅  Cancel", "value": "cancel"},
             ]
@@ -3932,8 +4016,18 @@ class CinemaCLI:
 
             choice = sel["value"]["value"]
             if choice == "remove":
+                if not self._confirm_action(f"Remove {len(items)} item(s) from list"):
+                    return
                 for item in items:
                     self.download_manager.remove_task(item["id"])
+                selected_indices.clear()
+            elif choice == "delete_and_remove":
+                if not self._confirm_action(
+                    f"Permanently delete downloaded files and remove {len(items)} item(s)"
+                ):
+                    return
+                for item in items:
+                    self.download_manager.remove_task(item["id"], delete_files=True)
                 selected_indices.clear()
             elif choice == "retry":
                 for item in items:

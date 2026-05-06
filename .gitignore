@@ -1,3 +1,18 @@
+# Runtime cache
+backend/src/cache/*.json
+
+# Logs
+*.log
+logs/
+backend/logs/
+
+# Local launchers
+cinema.bat
+
+# Temp
+*.tmp
+*.temp
+
 # Environment variables
 .env
 .env.local
@@ -63,3 +78,7 @@ docker-compose.override.yml
 pro-ai-orchestrator/
 .venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.benchmarks/
+build/

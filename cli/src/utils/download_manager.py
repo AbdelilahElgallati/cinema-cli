@@ -2154,8 +2154,44 @@ class DownloadManager:
                 self._save()
             return updated
 
-    def remove_task(self, task_id):
+    def remove_task(self, task_id, delete_files=False):
+        def _is_task_owned_path(path):
+            if not isinstance(path, str) or not path:
+                return False
+            try:
+                abs_path = os.path.abspath(path)
+                allowed_roots = [
+                    os.path.abspath(self.downloads_dir),
+                    os.path.abspath(self.temp_dir),
+                ]
+                return any(
+                    os.path.commonpath([abs_path, root]) == root for root in allowed_roots
+                )
+            except Exception:
+                return False
+
         with self.lock:
+            task_to_remove = next((t for t in self.queue if t.get("id") == task_id), None)
+            file_paths = []
+            if delete_files and task_to_remove:
+                def _collect_owned_path(raw_path):
+                    if not isinstance(raw_path, str) or not raw_path:
+                        return
+                    if _is_task_owned_path(raw_path):
+                        file_paths.append(raw_path)
+                    else:
+                        msg = f"Skipping unsafe delete path outside owned dirs: {raw_path}"
+                        self._log(msg, level="WARNING")
+                        console.print(f"[yellow]{msg}[/yellow]")
+
+                primary_path = task_to_remove.get("filename")
+                _collect_owned_path(primary_path)
+                for sub in task_to_remove.get("subtitle_files") or []:
+                    sub_path = sub.get("path") if isinstance(sub, dict) else None
+                    _collect_owned_path(sub_path)
+                single_sub = task_to_remove.get("subtitle_file")
+                _collect_owned_path(single_sub)
+
             # If removing the currently active download, clear the active slot
             # so the listener immediately picks up the next pending task.
             if self._current_task_id == task_id:
@@ -2167,7 +2203,16 @@ class DownloadManager:
             removed = self.queue_manager.remove_task(self.queue, task_id)
             if removed:
                 self._save()
-            return removed
+        if removed and delete_files:
+            for path in dict.fromkeys(file_paths):
+                try:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                except OSError as e:
+                    warn_msg = f"Could not delete {path}: {e}"
+                    self._log(warn_msg, level="WARNING")
+                    console.print(f"[yellow]{warn_msg}[/yellow]")
+        return removed
 
     def clear_completed(self):
         with self.lock:
