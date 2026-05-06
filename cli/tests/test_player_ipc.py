@@ -69,9 +69,9 @@ class TestPlayerIPC(unittest.TestCase):
 
         # 5. Verify cleanup (socket unlinked on Unix)
         if sys.platform != "win32":
-            with patch("cli.src.utils.player.os.path.exists") as mock_exists:
+            with patch("src.utils.player.os.path.exists") as mock_exists:
                 mock_exists.return_value = True
-                with patch("cli.src.utils.player.os.unlink") as mock_unlink:
+                with patch("src.utils.player.os.unlink") as mock_unlink:
                     # We need to simulate the end of play_stream
                     # Cleanup happens after stats = _run_mpv(mpv_args)
                     pass
