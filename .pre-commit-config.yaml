@@ -1,0 +1,22 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.13
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.16.0
+    hooks:
+      - id: mypy
+        args: ["--config-file=pyproject.toml"]
+        files: ^cli/
+
+  - repo: local
+    hooks:
+      - id: eslint-backend
+        name: eslint-backend
+        entry: npx --prefix backend eslint
+        language: system
+        files: ^backend/.*\.js$

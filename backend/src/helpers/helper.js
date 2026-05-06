@@ -1,11 +1,10 @@
+import dns from 'dns';
+import ipaddr from 'ipaddr.js';
+
 /**
  * @description Check if the given text could be a valid TMDB ID.
  * @param text {string} The text to check.
  * @returns {boolean} True if the text could be a valid TMDB ID, false otherwise.
- *
- * @example
- * // checkIfPossibleTmdbId("155"); // true
- * // checkIfPossibleTmdbId("1234567890abc"); // false
  */
 export function checkIfPossibleTmdbId(text) {
   let regex = /^[0-9]+$/;
@@ -21,36 +20,37 @@ export function handleErrorResponse(res, errorObject) {
   res.status(errorObject._responseCode).json(errorObject.toJSON());
 }
 
-/**
- * @description Validates if a URL is a known and allowed streaming CDN domain.
- * Blocks all private/loopback IP addresses to prevent SSRF.
- */
-const ALLOWED_STREAMING_DOMAINS = [
-  /vidsrc\.xyz/, /vidsrc\.to/, /vidsrc\.me/, /vidsrc\.cc/, /vidsrc\.pm/,
-  /vidplay\.online/, /filemoon\.sx/, /streamtape\.com/, /mixdrop\.co/,
-  /doodstream\.com/, /embed\.su/, /multiembed\.mov/, /rive\.one/,
-  /\.m3u8(\?|$)/, /\.ts(\?|$)/, /akamaized\.net/, /cloudfront\.net/,
-  /fastly\.net/, /cdn\d*\./, /stream\d*\./,
-];
+function isPrivateOrLocalAddress(address) {
+  if (!ipaddr.isValid(address)) {
+    return true;
+  }
 
-export function isAllowedStreamingUrl(urlString) {
-  try {
-    const url = new URL(urlString);
-    const hostname = url.hostname;
-    // Block internal/private IPs absolutely
-    if (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('172.16.') ||
-      hostname === '0.0.0.0' ||
-      hostname === '::1'
-    ) {
-      return false;
-    }
-    return ALLOWED_STREAMING_DOMAINS.some((pattern) => pattern.test(urlString));
-  } catch {
+  const parsed = ipaddr.process(address);
+
+  if (parsed.kind() === 'ipv4') {
+    return (
+      parsed.match(ipaddr.parseCIDR('127.0.0.0/8')) ||
+      parsed.match(ipaddr.parseCIDR('10.0.0.0/8')) ||
+      parsed.match(ipaddr.parseCIDR('172.16.0.0/12')) ||
+      parsed.match(ipaddr.parseCIDR('192.168.0.0/16')) ||
+      parsed.match(ipaddr.parseCIDR('169.254.0.0/16'))
+    );
+  }
+
+  return (
+    parsed.match(ipaddr.parseCIDR('::1/128')) ||
+    parsed.match(ipaddr.parseCIDR('fc00::/7'))
+  );
+}
+
+export async function isAllowedStreamingUrl(urlString) {
+  const url = new URL(urlString);
+  const { address } = await dns.promises.lookup(url.hostname);
+
+  if (isPrivateOrLocalAddress(address)) {
     return false;
   }
+
+  const pathname = url.pathname.toLowerCase();
+  return pathname.endsWith('.m3u8') || pathname.endsWith('.ts');
 }

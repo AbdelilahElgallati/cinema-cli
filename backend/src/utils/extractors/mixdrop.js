@@ -1,5 +1,6 @@
 import fetch from 'node-fetch';
 import { ErrorObject } from '../../helpers/ErrorObject.js';
+import JsUnpacker from '../jsunpack.js';
 
 export const extract_mixdrop = async (id) => {
   try {
@@ -23,23 +24,29 @@ export const extract_mixdrop = async (id) => {
     // Deobfuscate the packed JavaScript
     const evalCode = evalMatch[0];
 
-    // Create a sandbox environment with MDCore
-    const sandbox = {
-      MDCore: {},
-    };
+    // Safely unpack using JsUnpacker instead of unsafe execution
+    const unpacker = new JsUnpacker(evalCode);
+    if (!unpacker.detect()) {
+      throw new Error('Packer format not detected');
+    }
+    
+    const unpacked = unpacker.unpack();
+    if (!unpacked) {
+      throw new Error('Failed to unpack JavaScript');
+    }
 
-    // Execute in sandbox to populate MDCore
-    const fullCode = `
-            var MDCore = {};
-            ${evalCode};
-            return MDCore;
-        `;
+    // Now extract from the unpacked string using regex
+    const wurlMatch = unpacked.match(/wurl\s*=\s*["']([^"']+)["']/);
+    if (!wurlMatch) {
+      throw new Error('Could not extract video URL from unpacked code');
+    }
+    const url = wurlMatch[1];
 
-    const deobfuscated = new Function(fullCode)();
-
-    // Now extract from the MDCore object
-    const url = deobfuscated.wurl;
-    const referer = deobfuscated.referrer || '';
+    let referer = '';
+    const refMatch = unpacked.match(/referrer\s*=\s*["']([^"']+)["']/);
+    if (refMatch) {
+      referer = refMatch[1];
+    }
 
     if (!url) {
       throw new Error('Could not extract video URL from page');

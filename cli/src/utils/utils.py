@@ -1,41 +1,51 @@
 import re
 
 
-def normalize_lang(l):
-    """Normalize language codes to 2-letter standard."""
-    l = (l or "").strip().lower()
-    if l in ["arabic", "ara", "ar", "arab"]:
+def normalize_lang(l: str | None) -> str:
+    """Normalize language codes to 2-letter standard.
+
+    Handles subtags (en-US -> en), common aliases, and provider labels.
+    """
+    if not l:
+        return "und"
+
+    # Split on common separators and take the first part
+    # Handles "en-US", "pt_BR", "Arabic (Internal)", "English [SDH]"
+    l = l.strip().lower()
+    primary = re.split(r"[-_ \(\[]", l)[0]
+
+    if primary in ["arabic", "ara", "ar", "arab"]:
         return "ar"
-    if l in ["english", "eng", "en"]:
+    if primary in ["english", "eng", "en"]:
         return "en"
-    if l in ["french", "fra", "fre", "fr"]:
+    if primary in ["french", "fra", "fre", "fr"]:
         return "fr"
-    if l in ["spanish", "spa", "es"]:
+    if primary in ["spanish", "spa", "es"]:
         return "es"
-    if l in ["german", "deu", "ger", "de"]:
+    if primary in ["german", "deu", "ger", "de"]:
         return "de"
-    if l in ["turkish", "tur", "tr"]:
+    if primary in ["turkish", "tur", "tr"]:
         return "tr"
-    if l in ["portuguese", "por", "pt"]:
+    if primary in ["portuguese", "por", "pt"]:
         return "pt"
-    if l in ["italian", "ita", "it"]:
+    if primary in ["italian", "ita", "it"]:
         return "it"
-    if l in ["chinese", "zho", "chi", "zh"]:
+    if primary in ["chinese", "zho", "chi", "zh"]:
         return "zh"
-    if l in ["japanese", "jpn", "ja"]:
+    if primary in ["japanese", "jpn", "ja"]:
         return "ja"
-    if l in ["korean", "kor", "ko"]:
+    if primary in ["korean", "kor", "ko"]:
         return "ko"
-    if l in ["hindi", "hin", "hi"]:
+    if primary in ["hindi", "hin", "hi"]:
         return "hi"
-    return l or "und"
+
+    # If it's already a 2-letter code, return it, otherwise fallback
+    return primary if len(primary) == 2 else "und"
 
 
 def sanitize_filename(name):
     """Sanitize string to be safe for filenames"""
-    return (
-        "".join(c for c in name if c.isalnum() or c in " _-").strip().replace(" ", "_")
-    )
+    return "".join(c for c in name if c.isalnum() or c in " _-").strip().replace(" ", "_")
 
 
 def generate_filename(template, title, meta=None, source=None):

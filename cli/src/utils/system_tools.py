@@ -59,7 +59,8 @@ def _candidate_directories() -> list[str]:
     deduped: list[str] = []
     seen = set()
     for item in dirs:
-        if not item: continue
+        if not item:
+            continue
         key = str(item).lower().strip()
         if not key or key in seen:
             continue
@@ -97,15 +98,19 @@ def find_executable(name: str, aliases: list[str] | None = None) -> str | None: 
     # 3. Deep search for stubborn Windows installations (WinGet, etc.)
     if os.name == "nt":
         # Only search folders that actually exist and might contain our tools
-        search_roots = [d for d in candidate_dirs if ("WinGet" in d or "Packages" in d or "scoop" in d) and os.path.isdir(d)]
+        search_roots = [
+            d
+            for d in candidate_dirs
+            if ("WinGet" in d or "Packages" in d or "scoop" in d) and os.path.isdir(d)
+        ]
         for root_folder in search_roots:
             try:
                 # Limit depth to 3 to prevent hanging on massive drives
                 for root, dirs, files in os.walk(root_folder):
                     if root.count(os.sep) - root_folder.count(os.sep) > 3:
-                        del dirs[:] # don't go deeper
+                        del dirs[:]  # don't go deeper
                         continue
-                        
+
                     file_set = {f.lower() for f in files}
                     for candidate in names:
                         for ext in [".exe", ".cmd", ".bat"]:

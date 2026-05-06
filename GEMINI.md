@@ -14,7 +14,7 @@
 
 ```
 cinema-cli/
-├── backend/          # Node.js scraper proxy (runs on localhost:3000)
+├── backend/          # Node.js scraper proxy (runs on localhost:3010)
 ├── cli/              # Python TUI (Textual or curses-based)
 │   ├── main.py       # Entrypoint
 │   ├── ui/           # Screen/panel components
@@ -50,7 +50,7 @@ cinema-cli/
 | Framework | Express.js (assumed) |
 | HTTP Client | axios / node-fetch |
 | Purpose | Scrapes streaming links from public sources |
-| Port | localhost:3000 |
+| Port | localhost:3010 |
 
 ### External Dependencies
 | Tool | Role |
@@ -200,7 +200,7 @@ Based on README, verify each feature is actually implemented end-to-end:
 ### PHASE 3 — CLI Services
 7. `cli/services/` — TMDB client
 8. `cli/services/` — OpenSubtitles client
-9. `cli/services/` — Backend proxy client (localhost:3000)
+9. `cli/services/` — Backend proxy client (localhost:3010)
 
 ### PHASE 4 — Core Features
 10. `cli/downloads/` — Download manager

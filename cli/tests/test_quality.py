@@ -4,25 +4,25 @@ Run with:
     cd d:\\My_Projects\\cinema-cli\\cli
     python -m pytest tests/test_quality.py -v
 """
+
 import os
 import sys
-
-import pytest
 
 # Ensure the src package is importable from the cli directory
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from src.utils.player import _build_mpv_args, _quality_to_ytdl_format
 from src.utils.source_strategy import (
+    adaptive_quality_from_speed,
     build_quality_menu_options,
+    canonicalize_quality,
     filter_sources_for_quality,
     quality_sort_key,
     sort_manifest_qualities,
-    adaptive_quality_from_speed,
 )
-from src.utils.player import _quality_to_ytdl_format, _build_mpv_args
-
 
 # ─── _quality_to_ytdl_format ─────────────────────────────────────────────────
+
 
 class TestQualityToYtdlFormat:
     def test_1080p(self):
@@ -69,6 +69,7 @@ class TestQualityToYtdlFormat:
 
 # ─── _build_mpv_args ─────────────────────────────────────────────────────────
 
+
 class TestBuildMpvArgs:
     """Check that key flags are always present in the built argument list."""
 
@@ -97,9 +98,9 @@ class TestBuildMpvArgs:
     def test_ytdl_format_auto_mode_uses_format_sort(self):
         """Without a locked quality, yt-dlp should use format-sort=res,fps."""
         args = self._build(use_ytdl=True, quality=None)
-        assert any("format-sort=res,fps" in a for a in args), (
-            "format-sort hint missing from auto yt-dlp mode"
-        )
+        assert any(
+            "format-sort=res,fps" in a for a in args
+        ), "format-sort hint missing from auto yt-dlp mode"
         assert "--ytdl-format=bestvideo+bestaudio/best" in args
 
     def test_ytdl_format_locked_quality(self):
@@ -109,9 +110,9 @@ class TestBuildMpvArgs:
         assert matched, "No --ytdl-format flag found for locked quality"
         assert "720" in matched[0]
         # format-sort should NOT be added when quality is locked
-        assert not any("format-sort" in a for a in args), (
-            "format-sort should not be present when quality is locked"
-        )
+        assert not any(
+            "format-sort" in a for a in args
+        ), "format-sort should not be present when quality is locked"
 
     def test_title_present(self):
         args = self._build()
@@ -130,6 +131,7 @@ class TestBuildMpvArgs:
 
 
 # ─── source_strategy ─────────────────────────────────────────────────────────
+
 
 class TestSourceStrategy:
     def test_build_quality_menu_has_auto_option(self):
@@ -171,11 +173,24 @@ class TestSourceStrategy:
         assert mode == "auto"
         assert filtered == files
 
-    def test_filter_sources_unavailable_tagged(self):
+    def test_filter_sources_fallback_tagged(self):
         files = [{"file": "https://a.m3u8", "quality": "360p"}]
         filtered, mode = filter_sources_for_quality(files, "1080p")
-        assert mode == "unavailable_tagged"
-        assert filtered == []
+        assert mode == "fallback_tagged"
+        assert filtered == files
+
+    def test_filter_sources_handles_provider_quality_aliases(self):
+        files = [{"file": "https://a.m3u8", "quality": "astra"}]
+        filtered, mode = filter_sources_for_quality(files, "1080p")
+        assert mode == "ok_exact"
+        assert filtered == files
+
+    def test_canonicalize_quality_non_standard_tags(self):
+        assert canonicalize_quality("hd") == "1080p"
+        assert canonicalize_quality("fhd") == "1080p"
+        assert canonicalize_quality("sd") == "480p"
+        assert canonicalize_quality("low") == "360p"
+        assert canonicalize_quality("auto") == "auto"
 
     def test_filter_sources_enforced_manifest(self):
         """When no quality tags exist, all files should be returned for manifest enforcement."""

@@ -79,10 +79,11 @@ export async function getAutoembed(media) {
 
       if (data.tracks) {
         data.tracks.forEach((track) => {
-          subtitles.push({
-            lang: track.lang || 'unknown',
-            url: track.file,
-          });
+          if (!track || typeof track !== 'object') return;
+          const url = track.file || track.url;
+          const lang = track.lang || track.label || 'und';
+          if (!url) return;
+          subtitles.push({ url, lang });
         });
       }
     }

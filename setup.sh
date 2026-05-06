@@ -125,7 +125,7 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
         cp "$SCRIPT_DIR/.env_example" "$SCRIPT_DIR/.env"
         ok ".env created from .env_example — edit it to add your API keys."
     else
-        printf 'TMDB_API_KEY=\nPORT=3010\nBACKEND_URL=http://localhost:3010\nOPENSUBTITLES_API_KEY=\nDISABLE_CACHE=false\n' \
+        printf 'TMDB_API_KEY=\nPORT=3010\nBACKEND_URL=http://127.0.0.1:3010\nOPENSUBTITLES_API_KEY=\nDISABLE_CACHE=false\n' \
             > "$SCRIPT_DIR/.env"
         ok ".env stub created — add your TMDB_API_KEY."
     fi

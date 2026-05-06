@@ -49,8 +49,6 @@ export async function proxyTs(targetUrl, headers, req, res) {
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
       console.error(
         `[TS Proxy] Upstream failed: ${response.status} ${response.statusText} for ${targetUrl.substring(0, 80)}...`
@@ -102,5 +100,7 @@ export async function proxyTs(targetUrl, headers, req, res) {
       res.writeHead(500);
       res.end(`TS Proxy error: ${error.message}`);
     }
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

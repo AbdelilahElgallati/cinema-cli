@@ -149,7 +149,9 @@ def _resolve_qualities(full_scan):
     return ["240p", "360p", "480p", "720p", "1080p"]
 
 
-def sweep_case(label, api, tmdb_id, media_type, season=None, episode=None, force_refresh=False, full_scan=False):
+def sweep_case(
+    label, api, tmdb_id, media_type, season=None, episode=None, force_refresh=False, full_scan=False
+):
     qualities = _resolve_qualities(full_scan)
     rows = []
 
@@ -172,7 +174,9 @@ def sweep_case(label, api, tmdb_id, media_type, season=None, episode=None, force
 
     files = data.get("files", []) if isinstance(data, dict) else []
     quality_groups = data.get("quality_groups", {}) if isinstance(data, dict) else {}
-    print(f"[{label}] sources={len(files)} groups={list((quality_groups or {}).keys())}", flush=True)
+    print(
+        f"[{label}] sources={len(files)} groups={list((quality_groups or {}).keys())}", flush=True
+    )
 
     if not qualities:
         return {

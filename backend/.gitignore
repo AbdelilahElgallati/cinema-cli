@@ -37,3 +37,5 @@ docker-compose.override.yml
 # Temporary files
 tmp/
 temp/
+
+src/cache/provider_stats.json

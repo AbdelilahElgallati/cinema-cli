@@ -122,13 +122,15 @@ export async function getVidSrcCC(media) {
   let subtitles = [];
   // Only proceed if the source has subtitles
   for (let source of vidsrcCCSources) {
-    if (source.subtitles) {
-      source.subtitles.forEach((subtitle) => {
-        if (subtitle.file && subtitle.file.includes('http')) {
-          subtitles.push({
-            lang: languageMap[subtitle.label.split(' ')[0]] || subtitle.lang,
-            url: subtitle.file,
-          });
+    const rawSubs = source.subtitles || source.tracks || [];
+    if (Array.isArray(rawSubs)) {
+      rawSubs.forEach((subtitle) => {
+        if (!subtitle || typeof subtitle !== 'object') return;
+        const subUrl = subtitle.file || subtitle.url;
+        const safeLabel = subtitle.label || '';
+        const lang = languageMap[safeLabel] || subtitle.lang || 'und';
+        if (typeof subUrl === 'string' && subUrl.includes('http')) {
+          subtitles.push({ url: subUrl, lang });
         }
       });
     }

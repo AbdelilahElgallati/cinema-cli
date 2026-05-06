@@ -58,3 +58,8 @@ docker-compose.override.yml
 
 # Vercel
 .vercel/
+
+
+pro-ai-orchestrator/
+.venv/
+.pytest_cache/
